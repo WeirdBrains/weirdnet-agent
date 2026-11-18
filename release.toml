@@ -1,7 +1,7 @@
 # weirdnet-agent release config for weirdnet-project-helpers (scripts/weirdnet_release.py).
 # Usage: python3 scripts/weirdnet_release.py [--patch|--major|--version X.Y.Z] [--dry-run]
 # Notes come from CHANGELOG.md `## [Unreleased]`; a message is optional.
-helpers = "0.1.1"
+helpers = "0.3.2"
 project = "weirdnet-agent"
 next = ["docs.rs builds https://docs.rs/weirdnet-agent/{version} from the crates.io upload"]
 
