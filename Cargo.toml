@@ -1,0 +1,29 @@
+[package]
+name = "weirdnet-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Weirdnet agent runtime: a model-agnostic agent loop with streaming events and cancellation, tool sources and registry, tiered approval policy with per-site grants and standing allows, research budgets, and traces with citation checks."
+authors = ["m3talsmith <m3talsmith@gmail.com>"]
+license = "BSD-3-Clause"
+repository = "https://github.com/WeirdBrains/weirdnet-agent"
+documentation = "https://docs.rs/weirdnet-agent"
+readme = "README.md"
+keywords = ["agents", "llm", "tools", "approvals", "weirdnet"]
+categories = ["asynchronous"]
+include = ["src/**", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[features]
+default = []
+# Scripted model, approver and closure tools for tests in downstream crates.
+testing = []
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread", "test-util"] }
