@@ -85,6 +85,20 @@ impl RemoteError {
         RemoteError::Unavailable { message: message.into() }
     }
 
+    /// The request itself can't be served (`BadRequest`) or the asker gave up (`Cancelled`):
+    /// another node would answer the same, so a pool returns it at once instead of failing over.
+    pub fn is_request_error(&self) -> bool {
+        matches!(self, RemoteError::BadRequest { .. } | RemoteError::Cancelled)
+    }
+
+    /// A node's own answer about this request (it does not serve it, refuses the caller, lacks the
+    /// model or is busy), as opposed to a transport or engine failure. When every node fails, a
+    /// pool reports the last such answer before any transport error, so callers see why.
+    pub fn is_node_answer(&self) -> bool {
+        matches!(self, RemoteError::Unsupported { .. } | RemoteError::Refused { .. } | RemoteError::Unavailable { .. } | RemoteError::Busy)
+            || self.is_request_error()
+    }
+
     /// Infer/1 peers (0.3 and older) know only the original kinds; newer ones are sent there as
     /// `failed`.
     pub(crate) fn for_v1(self) -> Self {

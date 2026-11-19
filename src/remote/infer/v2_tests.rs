@@ -684,3 +684,82 @@ async fn embedding_token_counts_flow_to_the_pool() {
     let e = pool(dialer, &["plain"]).embed(EmbedRequest::new(vec!["a".into()]), &CancelToken::new()).await.unwrap();
     assert_eq!(e.usage, None, "a backend that does not count reports nothing");
 }
+
+/// Refuses every request with `error` and counts how often it was asked.
+struct Refusing {
+    error: RemoteError,
+    asked: Arc<AtomicUsize>,
+}
+
+impl InferHost for Refusing {
+    fn authorize(&self, _caller: &Caller) -> Result<(), RemoteError> {
+        Ok(())
+    }
+    fn open(&self, _caller: &Caller, _model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
+        Err(RemoteError::unavailable("infer/2 only"))
+    }
+    fn open_request(&self, _caller: &Caller, _request: &Request) -> Result<Arc<dyn InferBackend>, RemoteError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        Err(self.error.clone())
+    }
+    fn open_embed(&self, _caller: &Caller, _model: Option<&str>) -> Result<Arc<dyn EmbedBackend>, RemoteError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        Err(self.error.clone())
+    }
+}
+
+fn refusing(dialer: &MemoryDialer, node: &str, error: RemoteError) -> Arc<AtomicUsize> {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let host = Arc::new(Refusing { error, asked: asked.clone() });
+    dialer.route_only(node, &[v2::PROTOCOL], move |ch, _| {
+        let host = host.clone();
+        tokio::spawn(async move { v2::serve(ch, Caller::new("phone"), host.as_ref(), &Admission::new(1)).await });
+    });
+    asked
+}
+
+#[tokio::test]
+async fn bad_requests_are_returned_intact_without_failover() {
+    let dialer = MemoryDialer::new();
+    let bad = RemoteError::BadRequest { message: "no model named and no default".into() };
+    let first = refusing(&dialer, "a", bad.clone());
+    let second = refusing(&dialer, "b", bad.clone());
+    let p = pool(dialer, &["a", "b"]);
+
+    let err = p.embed(EmbedRequest::new(vec!["x".into()]), &CancelToken::new()).await.unwrap_err();
+    assert_eq!(err, bad);
+    let err = p.infer(Request::messages(vec![]), &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert_eq!(err.error, bad);
+    assert_eq!(err.tried.len(), 1);
+    assert_eq!((first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)), (2, 0), "the second node is never asked");
+}
+
+#[tokio::test]
+async fn node_errors_fail_over_and_the_node_answer_is_reported_over_transport_errors() {
+    let dialer = MemoryDialer::new();
+    let unknown = RemoteError::unavailable("unknown model `x`");
+    refusing(&dialer, "a", unknown.clone());
+    // "gone" is not routed at all: a transport error, tried last.
+    let p = pool(dialer.clone(), &["a", "gone"]);
+    let err = p.embed(EmbedRequest::new(vec!["x".into()]).with_model("x"), &CancelToken::new()).await.unwrap_err();
+    assert_eq!(err, unknown, "kind and message intact, not folded into one Unavailable");
+    let err = p.infer(Request::messages(vec![]).with_model("x"), &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert_eq!((err.error, err.tried.len()), (unknown, 2));
+
+    // A node that does not serve it, then one that does: failover still works.
+    refusing(&dialer, "old", RemoteError::Unsupported { message: "no embeddings here".into() });
+    let e = pool(dialer.clone(), &["old", "plain"]);
+    serving(&dialer, "plain", Script::new("m", false, vec![Step::Text("ok")]), Admission::new(1), None, "phone");
+    assert_eq!(e.embed(EmbedRequest::new(vec!["x".into()]), &CancelToken::new()).await.unwrap().node, "plain");
+    let only_old = pool(dialer, &["old"]);
+    let err = only_old.embed(EmbedRequest::new(vec!["x".into()]), &CancelToken::new()).await.unwrap_err();
+    assert!(matches!(err, RemoteError::Unsupported { .. }), "{err:?}");
+}
+
+#[test]
+fn request_errors_and_node_answers() {
+    assert!(RemoteError::BadRequest { message: String::new() }.is_request_error());
+    assert!(RemoteError::Cancelled.is_request_error());
+    assert!(!RemoteError::Busy.is_request_error() && RemoteError::Busy.is_node_answer());
+    assert!(!RemoteError::Timeout.is_node_answer() && !RemoteError::Closed.is_node_answer());
+}

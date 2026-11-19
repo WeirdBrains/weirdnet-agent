@@ -299,6 +299,13 @@ enum Fail {
     Error(RemoteError),
 }
 
+/// The error to report when every node failed, kind intact: the last node answer
+/// ([`RemoteError::is_node_answer`]), else the last error; `Unavailable(none)` with no nodes.
+fn reported<'a>(errors: impl DoubleEndedIterator<Item = &'a RemoteError> + Clone, none: &str) -> RemoteError {
+    let mut last = errors.clone().rev();
+    errors.rev().find(|e| e.is_node_answer()).or_else(|| last.next()).cloned().unwrap_or_else(|| RemoteError::unavailable(none))
+}
+
 /// Places `text` at `offset` in `buf`: `Ok(Some(new))` with the part that was not there yet,
 /// `Ok(None)` if it was all there, `Err` on a gap.
 fn splice(buf: &mut String, offset: u64, text: &str) -> Result<Option<String>, u64> {
@@ -404,6 +411,10 @@ impl Pool {
                 Err(Fail::Cancelled) => return Err(interrupted(RemoteError::Cancelled, answer, tried)),
                 Err(Fail::NoResume) => tried.push((node, RemoteError::Unsupported { message: "the node cannot resume an answer".into() })),
                 Err(Fail::Unsupported(e)) => tried.push((node, e)),
+                Err(Fail::Error(e)) if e.is_request_error() => {
+                    tried.push((node, e.clone()));
+                    return Err(interrupted(e, answer, tried));
+                }
                 Err(Fail::Error(e)) => {
                     tried.push((node, e.clone()));
                     if answer.has_output() && (!self.opts.resume || resumes.len() as u32 >= self.opts.max_resumes) {
@@ -412,10 +423,7 @@ impl Pool {
                 }
             }
         }
-        let error = match tried.last() {
-            None => RemoteError::unavailable("no inference node to run on"),
-            Some((_, e)) => e.clone(),
-        };
+        let error = reported(tried.iter().map(|(_, e)| e), "no inference node to run on");
         Err(interrupted(error, answer, tried))
     }
 
@@ -607,12 +615,13 @@ impl Pool {
             match self.embed_on(&node, &request, cancel).await {
                 Ok(e) => return Ok(e),
                 Err(Fail::Cancelled) => return Err(RemoteError::Cancelled),
-                Err(Fail::Error(e) | Fail::Unsupported(e)) => tried.push(format!("{node}: {e}")),
+                Err(Fail::Error(e) | Fail::Unsupported(e)) if e.is_request_error() => return Err(e),
+                Err(Fail::Error(e) | Fail::Unsupported(e)) => tried.push(e),
                 Err(Fail::NoResume) => {}
             }
             request.id = request_id();
         }
-        Err(if tried.is_empty() { RemoteError::unavailable("no inference node to run on") } else { RemoteError::unavailable(tried.join("; ")) })
+        Err(reported(tried.iter(), "no inference node to run on"))
     }
 
     async fn embed_on(&self, node: &str, request: &EmbedRequest, cancel: &CancelToken) -> Result<Embeddings, Fail> {
@@ -682,10 +691,11 @@ impl Pool {
             .unwrap_or(Err(RemoteError::Timeout));
             match r {
                 Ok(c) => return Ok(c),
-                Err(e) => tried.push(format!("{node}: {e}")),
+                Err(e) if e.is_request_error() => return Err(e),
+                Err(e) => tried.push(e),
             }
         }
-        Err(if tried.is_empty() { RemoteError::unavailable("no inference node to ask") } else { RemoteError::unavailable(tried.join("; ")) })
+        Err(reported(tried.iter(), "no inference node to ask"))
     }
 
     /// Follows the catalog: the first node that answers streams its changes; when it goes away
