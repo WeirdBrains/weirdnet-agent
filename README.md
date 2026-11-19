@@ -28,8 +28,17 @@ records what happened.
   URL that none of its steps fetched; `retain_valid` drops such citations before display.
 - Everything that is stored or synced implements serde.
 
-Inference (`weirdnet-model`), MCP client transports (`weirdnet-mcp`) and the remote-agent protocol
-over `weirdnet-net` are separate; this crate only defines the traits they implement.
+- `remote`: protocols between one user's own nodes over an app-supplied `Dialer` / `Channel`
+  (Weirdnet streams in the apps; `codec` frames messages on byte streams, `MemoryDialer` for tests).
+  `remote::infer` offloads one model turn: request, streamed tokens, cancel, and `RemoteModel`, a
+  `ModelBackend` that tries nodes in order and then a local fallback whenever a node fails before
+  any token streamed (unreachable, busy, no such model, no `Accepted` in time). `remote::task` runs
+  a whole task on another node (Node companions): events stream back as `AgentEvent`s, approval
+  cards are answered on the asking device, cancel stops the task there. The serving app checks the
+  caller is a linked device before calling `serve`.
+
+Inference (`weirdnet-model`), MCP client transports (`weirdnet-mcp`) and the network transport
+(`weirdnet-net`) are separate; this crate only defines the traits and protocols they plug into.
 
 The `testing` feature exposes `ScriptedModel`, `ScriptedApprover` and `FnTool` for downstream tests.
 

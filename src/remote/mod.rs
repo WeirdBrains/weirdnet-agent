@@ -15,6 +15,7 @@
 pub mod codec;
 pub mod infer;
 mod memory;
+pub mod task;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
