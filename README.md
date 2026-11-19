@@ -22,7 +22,8 @@ records what happened.
   approval.
 - `Budget` / `BudgetTracker`: searches, pages (+ extensions), concurrency, per-page and per-task
   time, tokens kept per page, model steps. Defaults: 3 searches, 12 pages (+5), 2 at a time,
-  15 s per page, 90 s per task, 4k tokens per page.
+  15 s per page, 90 s of tool time per task (model turns and approval waits don't count), 4k
+  tokens per page.
 - `Trace`, `TraceStep`, `Citation`: every search, fetch, tool call, approval and notice is a step
   with its agent, node and session (logged out or signed in). `validate_citations` rejects a cited
   URL that none of its steps fetched; `retain_valid` drops such citations before display.

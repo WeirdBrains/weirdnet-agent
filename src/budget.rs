@@ -1,7 +1,7 @@
 //! Research budgets: searches, pages, concurrency and time.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,9 @@ pub struct Budget {
     /// Hidden views or fetches at a time.
     pub max_concurrent: u32,
     pub per_page: Duration,
+    /// Time the task's tools may run, in total. Only time inside tool calls counts (see
+    /// [`BudgetTracker::time_tool`]): model turns and waiting for the user to answer an
+    /// approval card do not.
     pub per_task: Duration,
     /// Tokens of extracted text kept per page.
     pub tokens_per_page: u32,
@@ -59,6 +62,7 @@ pub struct BudgetUsage {
     pub searches: u32,
     pub pages: u32,
     pub page_limit: u32,
+    /// Tool time used, the time counted against [`Budget::per_task`].
     pub elapsed_ms: u64,
 }
 
@@ -70,7 +74,41 @@ pub struct BudgetTracker {
     pages: AtomicU32,
     extensions: AtomicU32,
     started: Instant,
+    tools: Mutex<ToolClock>,
     slots: Arc<Semaphore>,
+}
+
+/// Time spent in tool calls. Overlapping calls count once (wall time while any runs).
+#[derive(Debug, Default)]
+struct ToolClock {
+    spent: Duration,
+    running: u32,
+    since: Option<Instant>,
+}
+
+impl ToolClock {
+    fn now(&self) -> Duration {
+        self.spent + self.since.map(|t| t.elapsed()).unwrap_or_default()
+    }
+}
+
+/// Counts tool time against the task budget until dropped (see [`BudgetTracker::time_tool`]).
+#[derive(Debug)]
+#[must_use = "tool time counts only while the timer is held"]
+pub struct ToolTimer<'a> {
+    tracker: &'a BudgetTracker,
+}
+
+impl Drop for ToolTimer<'_> {
+    fn drop(&mut self) {
+        let mut c = self.tracker.tools.lock().unwrap_or_else(|e| e.into_inner());
+        c.running = c.running.saturating_sub(1);
+        if c.running == 0
+            && let Some(t) = c.since.take()
+        {
+            c.spent += t.elapsed();
+        }
+    }
 }
 
 impl BudgetTracker {
@@ -81,6 +119,7 @@ impl BudgetTracker {
             pages: AtomicU32::new(0),
             extensions: AtomicU32::new(0),
             started: Instant::now(),
+            tools: Mutex::new(ToolClock::default()),
             slots: Arc::new(Semaphore::new(budget.max_concurrent.max(1) as usize)),
         }
     }
@@ -115,10 +154,29 @@ impl BudgetTracker {
         self.page_limit()
     }
 
+    /// Tool time used so far: what [`Budget::per_task`] limits.
     pub fn elapsed(&self) -> Duration {
+        self.tools.lock().unwrap_or_else(|e| e.into_inner()).now()
+    }
+
+    /// Wall time since the task started, model turns and approval waits included (not limited;
+    /// for display and logs).
+    pub fn wall_elapsed(&self) -> Duration {
         self.started.elapsed()
     }
 
+    /// Starts counting tool time; it counts until the timer is dropped. The session holds one
+    /// around every tool call. Timers that overlap count the shared time once.
+    pub fn time_tool(&self) -> ToolTimer<'_> {
+        let mut c = self.tools.lock().unwrap_or_else(|e| e.into_inner());
+        if c.running == 0 {
+            c.since = Some(Instant::now());
+        }
+        c.running += 1;
+        ToolTimer { tracker: self }
+    }
+
+    /// Tool time left.
     pub fn remaining(&self) -> Duration {
         self.budget.per_task.saturating_sub(self.elapsed())
     }
@@ -172,14 +230,49 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn time_budget_runs_out() {
+    async fn time_budget_runs_out_on_tool_time() {
         let t = BudgetTracker::start(Budget::default());
         assert_eq!(t.page_timeout(), Duration::from_secs(15));
+        let timer = t.time_tool();
         tokio::time::advance(Duration::from_secs(80)).await;
         assert_eq!(t.page_timeout(), Duration::from_secs(10));
         tokio::time::advance(Duration::from_secs(10)).await;
+        drop(timer);
         assert_eq!(t.check_time(), Err(BudgetExceeded::Time { limit_ms: 90_000 }));
         assert!(matches!(t.charge_page(), Err(BudgetExceeded::Time { .. })));
+        assert_eq!(t.usage().elapsed_ms, 90_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_tool_time_counts() {
+        let t = BudgetTracker::start(Budget::default());
+        // A model turn or an approval card: no timer, nothing counted.
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert_eq!(t.elapsed(), Duration::ZERO);
+        assert!(t.check_time().is_ok());
+        {
+            let _call = t.time_tool();
+            tokio::time::advance(Duration::from_secs(5)).await;
+            assert_eq!(t.elapsed(), Duration::from_secs(5), "counts while the call runs");
+        }
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(t.elapsed(), Duration::from_secs(5));
+        assert_eq!(t.wall_elapsed(), Duration::from_secs(665));
+        assert_eq!(t.remaining(), Duration::from_secs(85));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overlapping_tool_calls_count_once() {
+        let t = BudgetTracker::start(Budget::default());
+        let a = t.time_tool();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let b = t.time_tool();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        drop(a);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        drop(b);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(t.elapsed(), Duration::from_secs(6));
     }
 
     #[tokio::test(start_paused = true)]

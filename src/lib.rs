@@ -29,7 +29,7 @@ pub mod testing;
 pub mod tool;
 pub mod trace;
 
-pub use budget::{Budget, BudgetExceeded, BudgetTracker, BudgetUsage};
+pub use budget::{Budget, BudgetExceeded, BudgetTracker, BudgetUsage, ToolTimer};
 pub use cancel::CancelToken;
 pub use identity::{AgentId, AgentIdentity, AgentKind};
 pub use model::{DeltaSink, Message, ModelBackend, ModelError, ModelTurn, Role, ToolCall};

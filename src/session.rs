@@ -231,13 +231,12 @@ impl AgentSession {
             }
             let specs = self.tools.specs();
             let sink = DeltaSink::new(task.events.clone());
-            let remaining = task.budget.remaining();
+            // Model time does not count against the task budget (only tool time does); a turn
+            // ends when the model answers, fails or the task is cancelled, and `max_steps`
+            // bounds how many there are.
             let result = tokio::select! {
                 r = self.model.complete(&self.messages, &specs, &sink, &task.cancel) => r,
                 _ = task.cancel.cancelled() => Err(ModelError::Cancelled),
-                _ = tokio::time::sleep(remaining) => {
-                    return (StopReason::Budget { exceeded: BudgetExceeded::Time { limit_ms: self.config.budget.per_task.as_millis() as u64 } }, text);
-                }
             };
             let turn = match result {
                 Ok(t) => t,
@@ -357,10 +356,13 @@ impl AgentSession {
         };
         let ctx = ToolContext { agent: who.clone(), task_id: task.trace.task_id.clone(), session: session.clone(), cancel: task.cancel.clone() };
         task.emit(AgentEvent::ToolStarted { call_id: call.id.clone(), tool: spec.name.clone() });
+        // Tool time is what the task budget limits (not the approval wait above).
+        let timer = task.budget.time_tool();
         let result = tokio::select! {
             r = tokio::time::timeout(limit, source.call(&spec.name, &ctx, call.arguments.clone())) => r.unwrap_or(Err(ToolError::Timeout)),
             _ = task.cancel.cancelled() => Err(ToolError::Cancelled),
         };
+        drop(timer);
         if task.cancel.is_cancelled() {
             return Err(StopReason::Cancelled);
         }
@@ -674,6 +676,88 @@ mod tests {
         assert!(matches!(out.trace.steps.last().unwrap().kind, StepKind::Cancelled));
         // Both calls got a reply so the conversation stays valid.
         assert_eq!(s.messages().iter().filter(|m| m.tool_call_id.is_some()).count(), 2);
+    }
+
+    /// A model that takes `delay` for every turn (a local model on a CPU).
+    struct SlowModel {
+        inner: ScriptedModel,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl ModelBackend for SlowModel {
+        fn name(&self) -> String {
+            "slow".into()
+        }
+        async fn complete(&self, m: &[Message], t: &[ToolSpec], d: &DeltaSink, c: &CancelToken) -> Result<ModelTurn, ModelError> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.complete(m, t, d, c).await
+        }
+    }
+
+    /// Answers like [`ScriptedApprover`] after the user took `delay` to read the card.
+    struct SlowApprover {
+        inner: ScriptedApprover,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl Approver for SlowApprover {
+        async fn decide(&self, prompt: &ApprovalPrompt, tool: &ToolSpec) -> ApprovalAnswer {
+            tokio::time::sleep(self.delay).await;
+            self.inner.decide(prompt, tool).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn model_turns_and_approval_waits_do_not_use_the_task_time() {
+        let turns = vec![
+            ModelTurn { text: String::new(), tool_calls: vec![call("1", "web.search", json!({ "q": "tokio" }))] },
+            ModelTurn { text: String::new(), tool_calls: vec![call("2", "web.fetch", json!({ "url": "https://tokio.rs/" }))] },
+            ModelTurn { text: "done".into(), tool_calls: vec![] },
+        ];
+        let model = SlowModel { inner: ScriptedModel::new(turns), delay: Duration::from_secs(120) };
+        let approver =
+            SlowApprover { inner: ScriptedApprover::new(vec![ApprovalAnswer::Approve { scope: Scope::Task }]), delay: Duration::from_secs(300) };
+        let mut cfg = AgentConfig::new(atlas());
+        cfg.budget.per_task = Duration::from_secs(90);
+        let tools = registry(vec![Arc::new(search_tool()), Arc::new(fetch_tool())]).await;
+        let mut s = AgentSession::new(cfg, Arc::new(model), tools, Policy::new().shared(), Arc::new(approver));
+        let started = tokio::time::Instant::now();
+        let out = s.run("research tokio", None, CancelToken::new()).await;
+        assert_eq!(out.stop, StopReason::Completed, "three 2 minute turns and a 5 minute card, but no tool time");
+        assert_eq!(out.text, "done");
+        assert!(started.elapsed() >= Duration::from_secs(660));
+        assert!(out.usage.elapsed_ms < 1_000, "{:?}", out.usage);
+    }
+
+    /// A tool that takes `secs` of tool time.
+    struct TakesTime(u64);
+
+    #[async_trait]
+    impl Tool for TakesTime {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::new("work", "work").tier(Tier::Read)
+        }
+        async fn call(&self, _ctx: &ToolContext, _args: Value) -> Result<ToolOutput, ToolError> {
+            tokio::time::sleep(Duration::from_secs(self.0)).await;
+            Ok(ToolOutput::text("worked"))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_time_still_ends_the_task() {
+        let turns = (0..5).map(|i| ModelTurn { text: String::new(), tool_calls: vec![call(&i.to_string(), "work", json!({}))] }).collect();
+        let model = SlowModel { inner: ScriptedModel::new(turns), delay: Duration::from_secs(60) };
+        let mut cfg = AgentConfig::new(atlas());
+        cfg.budget.per_task = Duration::from_secs(25);
+        let tools = registry(vec![Arc::new(TakesTime(10))]).await;
+        let mut s = AgentSession::new(cfg, Arc::new(model), tools, Policy::new().shared(), Arc::new(ScriptedApprover::default()));
+        let out = s.run("x", None, CancelToken::new()).await;
+        // 10 s + 10 s, then the third call gets the 5 s left and times out.
+        assert_eq!(out.stop, StopReason::Budget { exceeded: BudgetExceeded::Time { limit_ms: 25_000 } });
+        assert_eq!(out.usage.elapsed_ms, 25_000);
+        assert!(s.messages().iter().any(|m| m.content.contains("timed out")));
     }
 
     #[tokio::test]

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The task time budget (`Budget::per_task`, default 90 s) counts only time spent in tool calls.
+  Model turns and waiting for the user to answer an approval card no longer count, so a local
+  model on a CPU (most of a minute per turn) no longer ends research before it has researched.
+  `BudgetTracker::elapsed`, `remaining`, `check_time`, `page_timeout` and `BudgetUsage::elapsed_ms`
+  now report tool time. A model turn is no longer cut off when the task time runs out; turns are
+  bounded by `max_steps` and cancellation. No signatures changed, but tasks can now run longer in
+  wall time than `per_task`; callers that relied on it as a wall-clock limit should cancel on their
+  own timer.
+
+### Added
+
+- `BudgetTracker::time_tool` (a `ToolTimer` guard the session holds around every tool call;
+  overlapping timers count the shared time once) and `BudgetTracker::wall_elapsed`.
+
 ## [0.2.0] - 2026-11-18
 
 ### Added
