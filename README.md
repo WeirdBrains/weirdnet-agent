@@ -30,18 +30,35 @@ records what happened.
 - Everything that is stored or synced implements serde.
 
 - `remote`: protocols between one user's own nodes over an app-supplied `Dialer` / `Channel`
-  (Weirdnet streams in the apps; `codec` frames messages on byte streams, `MemoryDialer` for tests).
-  `remote::infer` offloads one model turn: request, streamed tokens, cancel, and `RemoteModel`, a
-  `ModelBackend` that tries nodes in order and then a local fallback whenever a node fails before
-  any token streamed (unreachable, busy, no such model, no `Accepted` in time). `remote::task` runs
-  a whole task on another node (Node companions): events stream back as `AgentEvent`s, approval
-  cards are answered on the asking device, cancel stops the task there. The serving app checks the
-  caller is a linked device before calling `serve`.
+  (`codec` frames messages on byte streams, `MemoryDialer` for tests). The serving side gets a
+  `Caller` (transport peer plus any presented certificate) and authorizes it.
+  - `remote::infer::v2` (`/weirdnet-agent/infer/2`, CBOR): priorities with a queue
+    (`Queued{position}`), sampling, seed, response format, tools, raw mode, reasoning and tool-call
+    frames with character offsets, usage and metadata, embeddings, and an assistant prefix so an
+    answer can resume on another node. `infer/1` (JSON) is still served for 0.3 callers.
+  - `remote::pool::Pool`: tries nodes in order, cancels a stalled stream (max(15 s, 3× the token
+    gap), under the transport's 30 s resume window) and resumes it elsewhere without repeating
+    text; embeddings, background jobs and catalog subscribe with failover. `RemoteModel` is a
+    `ModelBackend` over it, with a local fallback before any token has streamed.
+  - `remote::catalog` (`/weirdnet-agent/catalog/1`): which models the nodes have and their state.
+  - `remote::task` runs a whole task on another node (Node companions): events stream back as
+    `AgentEvent`s, approval cards are answered on the asking device, cancel stops the task there.
 
-Inference (`weirdnet-model`), MCP client transports (`weirdnet-mcp`) and the network transport
-(`weirdnet-net`) are separate; this crate only defines the traits and protocols they plug into.
+Features:
 
-The `testing` feature exposes `ScriptedModel`, `ScriptedApprover` and `FnTool` for downstream tests.
+- `pool`: the pool over `weirdnet-net`: `LinkedNodes` finds inference nodes among the user's
+  linked devices (roster), `NetDialer` opens streams, `connect` builds the `Pool`.
+- `serve`: `Server` serves infer/1, infer/2 and catalog/1 on a `weirdnet-net` node and announces
+  it; `RosterAuth` admits only linked devices (`weirdnet-sync` `Roster::check_caller`).
+- `testing`: `ScriptedModel`, `ScriptedApprover` and `FnTool` for downstream tests.
+
+Migrating from 0.3: implement `InferHost::authorize` (for Weirdnet, `serve::RosterAuth`), add the
+`caller` argument to `InferHost::open` and `infer::serve`, and add wildcard arms when matching
+public enums (`AgentEvent::ReasoningDelta` is new).
+
+Inference (`weirdnet-model`) and MCP client transports (`weirdnet-mcp`) are separate; the core
+only defines the traits and protocols they plug into, and only the `pool` and `serve` features
+depend on `weirdnet-net` and `weirdnet-sync`.
 
 ## License
 

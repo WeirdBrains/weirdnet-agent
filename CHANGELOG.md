@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- `remote::infer::v2` (`/weirdnet-agent/infer/2`, CBOR): priorities, `job_id`/`attempt`, inline messages or a `context_ref`, an assistant prefix to resume from, sampling, seed, `response_format`, tools and raw mode; `Queued`, `Accepted`, `Delta`/`Reasoning`/`ToolCall` frames with character offsets, `Usage`, and `Done` with metadata; f32 embeddings as byte strings. `InferBackend` and `EmbedBackend` for hosts that serve it; plain `ModelBackend`s are adapted.
+- `Admission::with_queue`: a priority queue behind `Queued{position}` (interactive, batch, background); each `Queued` resets the caller's accept timeout.
+- `remote::pool::Pool`: tries nodes, falls back to infer/1 on older nodes, cancels a stalled stream (no frame for max(15 s, 3× the recent token gap), capped at 25 s) and resumes on another node from the text already shown; also embeddings, background jobs, and catalog query/subscribe with failover.
+- `remote::catalog` (`/weirdnet-agent/catalog/1`): models with purpose, state, replicas and speed; query and subscribe; `CatalogFeed` for hosts.
+- `Caller` and `Authorize`: the serving side gets the transport peer and any presented certificate.
+- `DeltaSink::reasoning` and `AgentEvent::ReasoningDelta`.
+- `pool` feature: `NetDialer`, `LinkedNodes` (inference nodes among linked devices) and `connect` over `weirdnet-net` 0.8.
+- `serve` feature: `Server` serves infer/1, infer/2 and catalog/1 on a `weirdnet-net` node; `RosterAuth` checks callers with `weirdnet-sync` 0.5 `Roster::check_caller`.
+- `MemoryDialer::route_only`, to test peers that serve only some protocols.
+
+### Changed
+
+- **Breaking:** `InferHost` has a required `authorize(&Caller)`, and `open` takes the caller: `open(&self, caller: &Caller, model: Option<&str>)`. `infer::serve(ch, caller: &Caller, host, admission)`.
+- **Breaking:** public enums are `#[non_exhaustive]`; `RemoteError` gains `Unsupported`, `BadRequest`, `Cancelled` and `Stalled` (sent as `failed` on infer/1).
+- `RemoteModel` is built on `Pool`: it speaks infer/2 first and infer/1 to 0.3 nodes; resume is opt-in (`with_resume`).
+- `remote::task` does not forward reasoning deltas.
+
 ## [0.3.0] - 2026-11-19
 
 ### Changed
