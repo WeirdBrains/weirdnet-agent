@@ -18,7 +18,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::budget::{Budget, BudgetExceeded, BudgetTracker, BudgetUsage};
 use crate::cancel::CancelToken;
-use crate::identity::AgentIdentity;
+use crate::identity::{AgentId, AgentIdentity};
 use crate::model::{DeltaSink, Message, ModelBackend, ModelError, ToolCall};
 use crate::policy::{ActionRequest, ApprovalPrompt, Decision, DenyReason, Scope, SharedPolicy, SkipNotice, TaskApprovals, Tier};
 use crate::tool::{BudgetCharge, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolSpec};
@@ -48,10 +48,28 @@ pub enum ApprovalAnswer {
     Deny,
 }
 
+/// The task's page budget ran out: may it read `extension` more pages (the "+5 pages" card)?
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PagesPrompt {
+    pub agent: AgentId,
+    pub task_id: String,
+    /// Pages read so far (the limit that ran out).
+    pub used: u32,
+    /// Pages one extension adds ([`Budget::page_extension`]).
+    pub extension: u32,
+}
+
 /// Shows approval cards and waits for the user. The session races it against cancellation.
 #[async_trait]
 pub trait Approver: Send + Sync {
     async fn decide(&self, prompt: &ApprovalPrompt, tool: &ToolSpec) -> ApprovalAnswer;
+
+    /// Asked when the task's page budget runs out; `true` adds one extension and the page is
+    /// read. Asked again each time the extended limit runs out, never again in a task after a
+    /// `false`. Waiting for the answer does not use the task's time. By default no extension.
+    async fn extend_pages(&self, _prompt: &PagesPrompt) -> bool {
+        false
+    }
 }
 
 /// Why a task ended.
@@ -112,6 +130,8 @@ struct TaskRun {
     signed_in: Option<String>,
     events: Option<UnboundedSender<AgentEvent>>,
     cancel: CancelToken,
+    /// The user declined more pages in this task: don't ask again.
+    pages_declined: bool,
 }
 
 impl TaskRun {
@@ -194,6 +214,7 @@ impl AgentSession {
             signed_in: self.signed_in_next.take(),
             events,
             cancel,
+            pages_declined: false,
         };
         task.emit(AgentEvent::TaskStarted { task_id: task_id.clone() });
         if self.messages.is_empty()
@@ -333,11 +354,33 @@ impl AgentSession {
         }
 
         // Budget.
-        let charged = match spec.charge {
+        let mut charged = match spec.charge {
             BudgetCharge::None => task.budget.check_time(),
             BudgetCharge::Search => task.budget.charge_search(),
             BudgetCharge::Page => task.budget.charge_page(),
         };
+        if let Err(BudgetExceeded::Pages { limit }) = charged
+            && !task.pages_declined
+            && self.config.budget.page_extension > 0
+        {
+            let prompt =
+                PagesPrompt { agent: who.id.clone(), task_id: task.trace.task_id.clone(), used: limit, extension: self.config.budget.page_extension };
+            let more = tokio::select! {
+                m = self.approver.extend_pages(&prompt) => m,
+                _ = task.cancel.cancelled() => return Err(StopReason::Cancelled),
+            };
+            if more {
+                let now = task.budget.extend_pages();
+                self.record(
+                    task,
+                    StepKind::Notice { text: format!("{} may read {} more pages (up to {now})", who.name, prompt.extension) },
+                    SessionMark::LoggedOut,
+                );
+                charged = task.budget.charge_page();
+            } else {
+                task.pages_declined = true;
+            }
+        }
         if let Err(exceeded) = charged {
             self.record(task, StepKind::Skipped { reason: exceeded.to_string(), url: target.url.clone() }, SessionMark::LoggedOut);
             if matches!(exceeded, BudgetExceeded::Time { .. }) {
@@ -758,6 +801,68 @@ mod tests {
         assert_eq!(out.stop, StopReason::Budget { exceeded: BudgetExceeded::Time { limit_ms: 25_000 } });
         assert_eq!(out.usage.elapsed_ms, 25_000);
         assert!(s.messages().iter().any(|m| m.content.contains("timed out")));
+    }
+
+    /// Approves every card for the task and answers "+5 pages" from a queue (then no).
+    struct PagesApprover {
+        more: Mutex<Vec<bool>>,
+        asked: Mutex<Vec<PagesPrompt>>,
+    }
+
+    #[async_trait]
+    impl Approver for PagesApprover {
+        async fn decide(&self, _prompt: &ApprovalPrompt, _tool: &ToolSpec) -> ApprovalAnswer {
+            ApprovalAnswer::Approve { scope: Scope::Task }
+        }
+        async fn extend_pages(&self, prompt: &PagesPrompt) -> bool {
+            self.asked.lock().unwrap().push(prompt.clone());
+            let mut more = self.more.lock().unwrap();
+            if more.is_empty() { false } else { more.remove(0) }
+        }
+    }
+
+    fn fetches(n: usize) -> Vec<ModelTurn> {
+        let mut turns: Vec<ModelTurn> = (0..n)
+            .map(|i| ModelTurn {
+                text: String::new(),
+                tool_calls: vec![call(&i.to_string(), "web.fetch", json!({ "url": format!("https://p{i}.example/") }))],
+            })
+            .collect();
+        turns.push(ModelTurn { text: "done".into(), tool_calls: vec![] });
+        turns
+    }
+
+    #[tokio::test]
+    async fn a_task_out_of_pages_asks_for_more_and_reads_on_when_given_them() {
+        let approver = Arc::new(PagesApprover { more: Mutex::new(vec![true]), asked: Mutex::default() });
+        let mut cfg = AgentConfig::new(atlas());
+        cfg.budget.max_pages = 2;
+        cfg.budget.page_extension = 2;
+        let tools = registry(vec![Arc::new(fetch_tool())]).await;
+        let mut s = AgentSession::new(cfg, Arc::new(ScriptedModel::new(fetches(6))), tools, Policy::new().shared(), approver.clone());
+        let out = s.run("read a lot", None, CancelToken::new()).await;
+        assert_eq!(out.stop, StopReason::Completed);
+        let asked = approver.asked.lock().unwrap().clone();
+        // At 2 pages (yes: up to 4), at 4 (no), and never again after the no.
+        assert_eq!(asked.iter().map(|p| (p.used, p.extension)).collect::<Vec<_>>(), vec![(2, 2), (4, 2)]);
+        assert_eq!(asked[0].agent, atlas().id);
+        assert_eq!((out.usage.pages, out.usage.page_limit), (4, 4));
+        assert!(out.trace.steps.iter().any(|st| matches!(&st.kind, StepKind::Notice { text } if text == "Atlas may read 2 more pages (up to 4)")));
+        let skipped =
+            out.trace.steps.iter().filter(|st| matches!(&st.kind, StepKind::Skipped { reason, .. } if reason.contains("page budget"))).count();
+        assert_eq!(skipped, 2, "pages 5 and 6 are not read");
+    }
+
+    #[tokio::test]
+    async fn by_default_an_approver_gives_no_more_pages() {
+        let approver = Arc::new(ScriptedApprover::new(vec![ApprovalAnswer::Approve { scope: Scope::Task }]));
+        let mut cfg = AgentConfig::new(atlas());
+        cfg.budget.max_pages = 1;
+        let tools = registry(vec![Arc::new(fetch_tool())]).await;
+        let mut s = AgentSession::new(cfg, Arc::new(ScriptedModel::new(fetches(2))), tools, Policy::new().shared(), approver);
+        let out = s.run("x", None, CancelToken::new()).await;
+        assert_eq!((out.usage.pages, out.usage.page_limit), (1, 1));
+        assert!(s.messages().iter().any(|m| m.content.contains("not run: page budget used (1 pages)")));
     }
 
     #[tokio::test]

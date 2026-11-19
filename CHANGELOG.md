@@ -17,6 +17,11 @@
 
 - `BudgetTracker::time_tool` (a `ToolTimer` guard the session holds around every tool call;
   overlapping timers count the shared time once) and `BudgetTracker::wall_elapsed`.
+- "+5 pages": `Approver::extend_pages(&PagesPrompt) -> bool`, asked when a task's page budget runs
+  out; `true` adds one `Budget::page_extension` and the page is read, with a notice step in the
+  trace. Asked again when the extended limit runs out, never again in a task after `false`. The
+  default method answers `false`, so existing approvers keep today's behaviour. Tasks run on
+  another node (`remote::task`) don't forward it yet and never extend.
 
 ## [0.2.0] - 2026-11-18
 
