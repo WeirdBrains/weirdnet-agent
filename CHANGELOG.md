@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-19
+
 ### Added
 
 - `remote::infer::v2` (`/weirdnet-agent/infer/2`, CBOR): priorities, `job_id`/`attempt`, inline messages or a `context_ref`, an assistant prefix to resume from, sampling, seed, `response_format`, tools and raw mode; `Queued`, `Accepted`, `Delta`/`Reasoning`/`ToolCall` frames with character offsets, `Usage`, and `Done` with metadata; f32 embeddings as byte strings. `InferBackend` and `EmbedBackend` for hosts that serve it; plain `ModelBackend`s are adapted.
