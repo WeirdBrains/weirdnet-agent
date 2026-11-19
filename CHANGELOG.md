@@ -4,24 +4,14 @@
 
 ### Changed
 
-- The task time budget (`Budget::per_task`, default 90 s) counts only time spent in tool calls.
-  Model turns and waiting for the user to answer an approval card no longer count, so a local
-  model on a CPU (most of a minute per turn) no longer ends research before it has researched.
-  `BudgetTracker::elapsed`, `remaining`, `check_time`, `page_timeout` and `BudgetUsage::elapsed_ms`
-  now report tool time. A model turn is no longer cut off when the task time runs out; turns are
-  bounded by `max_steps` and cancellation. No signatures changed, but tasks can now run longer in
-  wall time than `per_task`; callers that relied on it as a wall-clock limit should cancel on their
-  own timer.
+- **Behaviour change:** `Budget::per_task` now counts tool time only, not wall-clock time; model turns and approval waits no longer count, so tasks can run longer than `per_task` in wall time (cancel on your own timer if you relied on it).
+- A model turn is no longer cut off when the task time runs out; `max_steps` and cancellation bound turns.
 
 ### Added
 
-- `BudgetTracker::time_tool` (a `ToolTimer` guard the session holds around every tool call;
-  overlapping timers count the shared time once) and `BudgetTracker::wall_elapsed`.
-- "+5 pages": `Approver::extend_pages(&PagesPrompt) -> bool`, asked when a task's page budget runs
-  out; `true` adds one `Budget::page_extension` and the page is read, with a notice step in the
-  trace. Asked again when the extended limit runs out, never again in a task after `false`. The
-  default method answers `false`, so existing approvers keep today's behaviour. Tasks run on
-  another node (`remote::task`) don't forward it yet and never extend.
+- `ToolTimer` and `BudgetTracker::time_tool`, the guard that times each tool call.
+- `BudgetTracker::wall_elapsed`, the task's wall-clock time.
+- `Approver::extend_pages` (default: no) and `PagesPrompt`, to offer more pages when a task's page budget runs out; `remote::task` doesn't forward it yet.
 
 ## [0.2.0] - 2026-11-18
 
