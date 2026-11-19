@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-19
+
 ### Added
 
 - infer/2 `Input::Prompt` and `Request::prompt`: a raw text prompt for completions (no chat template, no tools; a prompt with tools is a bad request). `Request::raw_prompt` reads it. `ModelAdapter` answers `Unsupported`; 0.4.0 servers can't decode it and close the stream, so the pool moves on.
