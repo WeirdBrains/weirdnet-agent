@@ -198,6 +198,9 @@ pub enum PoolEvent {
         node: String,
         offset: u64,
     },
+    /// Response metadata the node knew before the answer, such as a cache hit (0.4.1 servers
+    /// and later; the final [`Answer::meta`] has it too).
+    Meta(Meta),
 }
 
 /// Where a [`Pool`] streams [`PoolEvent`]s. A [`DeltaSink`] takes the text and reasoning.
@@ -283,6 +286,8 @@ pub struct Embeddings {
     pub model: String,
     pub node: String,
     pub meta: Meta,
+    /// Prompt tokens, when the serving node reports them (0.4.1 servers and later).
+    pub usage: Option<Usage>,
 }
 
 enum Fail {
@@ -427,7 +432,9 @@ impl Pool {
     ) -> Result<Finish, Fail> {
         let mut ch = self.open(node, v2::PROTOCOL, cancel).await?;
         let id = request.id.clone();
-        ch.send_cbor(&ClientFrame::Infer(request.clone())).await.map_err(Fail::Error)?;
+        let mut sent = request.clone();
+        sent.early_meta = true;
+        ch.send_cbor(&ClientFrame::Infer(sent)).await.map_err(Fail::Error)?;
         let wants_resume = request.assistant_prefix.as_ref().is_some_and(|p| !p.is_empty());
         let mut accepted = false;
         let mut gaps = Gaps::default();
@@ -505,6 +512,10 @@ impl Pool {
                     gaps.tick();
                     answer.usage = Some(usage);
                     events.event(PoolEvent::Usage(usage));
+                }
+                ServerFrame::Meta { meta, .. } if accepted => {
+                    gaps.tick();
+                    events.event(PoolEvent::Meta(meta));
                 }
                 ServerFrame::Done { finish, .. } if accepted => return Ok(finish),
                 ServerFrame::Failed { error, .. } => {
@@ -649,6 +660,7 @@ impl Pool {
                     }
                     out.vectors = got.into_values().collect();
                     out.meta = finish.meta;
+                    out.usage = finish.usage;
                     return Ok(out);
                 }
                 ServerFrame::Failed { error, .. } => return Err(Fail::Error(error)),

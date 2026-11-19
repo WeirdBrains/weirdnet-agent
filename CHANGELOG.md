@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- infer/2 `Input::Prompt` and `Request::prompt`: a raw text prompt for completions (no chat template, no tools; a prompt with tools is a bad request). `Request::raw_prompt` reads it. `ModelAdapter` answers `Unsupported`; 0.4.0 servers can't decode it and close the stream, so the pool moves on.
+- infer/2 early metadata: `Output::meta` lets a backend report metadata before the answer (a cache hit before replaying a cached answer). Askers that set `Request::early_meta` get a `ServerFrame::Meta` frame; the pool sets it and reports `PoolEvent::Meta`. Either way `Done` carries it. Servers that predate it ignore the flag.
+- Embedding usage: `EmbedBackend::embed_counted` (default: `embed` with no count) returns the prompt tokens; the server sums them into `Finish::usage` and the pool into the new `Embeddings::usage`.
+
 ## [0.4.0] - 2026-11-19
 
 ### Added

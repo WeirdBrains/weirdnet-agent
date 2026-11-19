@@ -27,6 +27,8 @@ enum Step {
     Reasoning(&'static str),
     Call(&'static str),
     Usage(u64, u64),
+    /// Early metadata: a cache hit.
+    CacheHit,
     Sleep(u64),
     /// Wait until cancelled.
     Hang,
@@ -72,6 +74,7 @@ impl InferBackend for Script {
                 Step::Reasoning(t) => out.reasoning(*t),
                 Step::Call(name) => out.tool_call(ToolCall { id: format!("c-{name}"), name: (*name).into(), arguments: json!({"q": name}) }),
                 Step::Usage(p, c) => out.usage(Usage::new(*p, *c)),
+                Step::CacheHit => out.meta(v2::Meta { cache_hit: true, ..Default::default() }),
                 Step::Sleep(ms) => tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(*ms)) => {}
                     _ = cancel.cancelled() => {}
@@ -581,4 +584,103 @@ async fn infer1_keeps_its_json_and_old_error_kinds() {
     assert_eq!(String::from_utf8(raw).unwrap(), r#"{"msg":"failed","id":"1","error":{"kind":"refused","message":"unknown-device"}}"#);
     server.await.unwrap().unwrap();
     assert_eq!(RemoteError::Stalled { ms: 1 }.for_v1(), RemoteError::Failed { message: "stalled: no frame for 1 ms".into() });
+}
+
+#[tokio::test]
+async fn raw_prompts_reach_backends_and_model_adapters_refuse_them() {
+    let dialer = MemoryDialer::new();
+    let script = Script::new("base", false, vec![Step::Text(" there was")]);
+    serving(&dialer, "a", script.clone(), Admission::new(1), None, "phone");
+    let answer = pool(dialer.clone(), &["a"]).infer(Request::prompt("Once upon a time"), &NoEvents, &CancelToken::new()).await.unwrap();
+    assert_eq!(answer.text, " there was");
+    let seen = &script.seen()[0];
+    assert_eq!((seen.raw_prompt(), seen.inline_messages()), (Some("Once upon a time"), None));
+
+    let with_tools = Request::prompt("x").with_tools(vec![ToolSpec::new("f", "a tool")]);
+    let err = pool(dialer.clone(), &["a"]).infer(with_tools, &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(matches!(err.error, RemoteError::BadRequest { .. }), "{:?}", err.error);
+
+    let host = Arc::new(super::tests_support::ModelHost(Arc::new(ScriptedModel::new(vec![]))));
+    dialer.route("plain", move |ch, _| {
+        let host = host.clone();
+        tokio::spawn(async move { v2::serve(ch, Caller::new("phone"), host.as_ref(), &Admission::new(1)).await });
+    });
+    let err = pool(dialer, &["plain"]).infer(Request::prompt("x"), &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(matches!(err.error, RemoteError::Unsupported { .. }), "{:?}", err.error);
+
+    let m = ClientFrame::Infer(Request::prompt("p"));
+    assert_eq!(from_cbor::<ClientFrame>(&to_cbor(&m).unwrap()).unwrap(), m);
+}
+
+#[tokio::test]
+async fn early_meta_reaches_the_pool_before_the_text() {
+    let dialer = MemoryDialer::new();
+    serving(&dialer, "a", Script::new("m", false, vec![Step::CacheHit, Step::Text("cached")]), Admission::new(1), None, "phone");
+    let (tx, mut rx) = events();
+    let answer = pool(dialer, &["a"]).infer(Request::messages(vec![Message::user("q")]), &tx, &CancelToken::new()).await.unwrap();
+    assert!(answer.meta.cache_hit);
+    let evs = drain(&mut rx);
+    let meta_at = evs.iter().position(|e| matches!(e, PoolEvent::Meta(m) if m.cache_hit)).expect("a Meta event");
+    let text_at = evs.iter().position(|e| matches!(e, PoolEvent::Text(_))).unwrap();
+    assert!(meta_at < text_at, "{evs:?}");
+}
+
+#[tokio::test]
+async fn askers_that_do_not_read_meta_get_it_only_in_done() {
+    let host = Host { backend: Script::new("m", false, vec![Step::CacheHit, Step::Text("cached")]) };
+    let (mut ours, theirs) = memory_pair();
+    let server = tokio::spawn(async move { v2::serve(theirs, Caller::new("phone"), &host, &Admission::new(1)).await });
+    let req = Request::messages(vec![]);
+    assert!(!to_cbor(&req).unwrap().windows(10).any(|w| w == b"early_meta"), "the flag is not on the wire when unset");
+    ours.send_cbor(&ClientFrame::Infer(req)).await.unwrap();
+    let mut frames = Vec::new();
+    while let Some(f) = ours.recv_cbor::<ServerFrame>().await.unwrap() {
+        let done = matches!(f, ServerFrame::Done { .. });
+        frames.push(f);
+        if done {
+            break;
+        }
+    }
+    server.await.unwrap().unwrap();
+    assert!(!frames.iter().any(|f| matches!(f, ServerFrame::Meta { .. })), "{frames:?}");
+    let ServerFrame::Done { finish, .. } = frames.last().unwrap() else { panic!() };
+    assert!(finish.meta.cache_hit);
+}
+
+#[tokio::test]
+async fn embedding_token_counts_flow_to_the_pool() {
+    struct Counting;
+    #[async_trait]
+    impl EmbedBackend for Counting {
+        fn name(&self) -> String {
+            "counting".into()
+        }
+        async fn embed(&self, _input: &str, _cancel: &CancelToken) -> Result<Vec<f32>, RemoteError> {
+            Ok(vec![1.0])
+        }
+        async fn embed_counted(&self, input: &str, cancel: &CancelToken) -> Result<(Vec<f32>, Option<u64>), RemoteError> {
+            Ok((self.embed(input, cancel).await?, Some(input.split_whitespace().count() as u64)))
+        }
+    }
+    struct CountingHost;
+    impl InferHost for CountingHost {
+        fn authorize(&self, _caller: &Caller) -> Result<(), RemoteError> {
+            Ok(())
+        }
+        fn open(&self, _caller: &Caller, _model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
+            Err(RemoteError::unavailable("embeddings only"))
+        }
+        fn open_embed(&self, _caller: &Caller, _model: Option<&str>) -> Result<Arc<dyn EmbedBackend>, RemoteError> {
+            Ok(Arc::new(Counting))
+        }
+    }
+    let dialer = MemoryDialer::new();
+    dialer.route("counting", |ch, _| {
+        tokio::spawn(async move { v2::serve(ch, Caller::new("phone"), &CountingHost, &Admission::new(1)).await });
+    });
+    serving(&dialer, "plain", Script::new("m", false, vec![]), Admission::new(1), None, "phone");
+    let e = pool(dialer.clone(), &["counting"]).embed(EmbedRequest::new(vec!["a b".into(), "c d e".into()]), &CancelToken::new()).await.unwrap();
+    assert_eq!(e.usage, Some(Usage::new(5, 0)));
+    let e = pool(dialer, &["plain"]).embed(EmbedRequest::new(vec!["a".into()]), &CancelToken::new()).await.unwrap();
+    assert_eq!(e.usage, None, "a backend that does not count reports nothing");
 }

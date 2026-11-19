@@ -6,6 +6,7 @@
 //!                                           <- Queued { position } ...   (while waiting for a slot)
 //!                                           <- Accepted { model, attempt, resume }
 //!                                           <- Delta { offset, text } | Reasoning { offset, text }
+//!                                           <- Meta { meta }             (early_meta askers)
 //!                                           <- ToolCall { index, call } | Usage | Embedding ...
 //!   Cancel { id } ->                        (any time)
 //!                                           <- Done { finish } | Failed { error } | Cancelled
@@ -26,6 +27,10 @@
 //!   comes after it, starting at offset = prefix length. Others say `resume: false` and start
 //!   over at 0; askers that need a resume move on.
 //! - **Tool calls** are sent whole, never half-built.
+//! - **Raw prompts** ([`Input::Prompt`]) are for completions: the model continues the text, with
+//!   no chat template and no tools.
+//! - **Early metadata:** an asker that sets [`Request::early_meta`] may get a `Meta` frame before
+//!   the answer (a cache hit, say); `Done` carries the same metadata for everyone.
 //! - **Raw mode** is for inference node → model node calls: assembled messages only, no context
 //!   lookups, caches or stand-ins.
 //! - **Embeddings:** one `Embedding` frame per input, the vector as a CBOR byte string of
@@ -93,6 +98,9 @@ pub enum Input {
     Messages(Vec<Message>),
     /// A conversation the serving node holds.
     Context(ContextRef),
+    /// A raw text prompt the model continues (OpenAI `/v1/completions`); no chat template,
+    /// no tools. Servers older than 0.4.1 can't read it and close the stream.
+    Prompt(String),
 }
 
 impl Default for Input {
@@ -214,6 +222,15 @@ pub struct Request {
     /// against the transport peer.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "bytes::opt")]
     pub cert: Option<Vec<u8>>,
+    /// The asker reads [`ServerFrame::Meta`] (0.4.1 and later), so the server may send response
+    /// metadata it knows before the answer, such as a cache hit. Servers that predate it ignore
+    /// the flag; askers that don't set it never get the frame.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub early_meta: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Request {
@@ -225,6 +242,11 @@ impl Request {
     /// A request over a conversation the serving node holds.
     pub fn context(context: ContextRef) -> Self {
         Self::with_input(Input::Context(context))
+    }
+
+    /// A request over a raw text prompt (see [`Input::Prompt`]).
+    pub fn prompt(prompt: impl Into<String>) -> Self {
+        Self::with_input(Input::Prompt(prompt.into()))
     }
 
     fn with_input(input: Input) -> Self {
@@ -287,7 +309,15 @@ impl Request {
     pub fn inline_messages(&self) -> Option<&[Message]> {
         match &self.input {
             Input::Messages(m) => Some(m),
-            Input::Context(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The raw prompt, if the input is one.
+    pub fn raw_prompt(&self) -> Option<&str> {
+        match &self.input {
+            Input::Prompt(p) => Some(p),
+            _ => None,
         }
     }
 
@@ -483,6 +513,12 @@ pub enum ServerFrame {
     Cancelled {
         id: String,
     },
+    /// Response metadata known before the answer (a cache hit, a stand-in, the revision). Sent
+    /// only to askers that set [`Request::early_meta`]; `Done` carries it again.
+    Meta {
+        id: String,
+        meta: Meta,
+    },
 }
 
 impl ServerFrame {
@@ -496,6 +532,7 @@ impl ServerFrame {
             | ServerFrame::ToolCall { id, .. }
             | ServerFrame::Embedding { id, .. }
             | ServerFrame::Usage { id, .. }
+            | ServerFrame::Meta { id, .. }
             | ServerFrame::Done { id, .. }
             | ServerFrame::Failed { id, .. }
             | ServerFrame::Cancelled { id } => id,
@@ -523,6 +560,7 @@ pub(crate) enum Piece {
     Reasoning(String),
     ToolCall(ToolCall),
     Usage(Usage),
+    Meta(Meta),
 }
 
 /// Where an [`InferBackend`] streams its output. The server turns it into frames with offsets.
@@ -562,6 +600,13 @@ impl Output {
     pub fn usage(&self, usage: Usage) {
         let _ = self.tx.send(Piece::Usage(usage));
     }
+
+    /// Response metadata known before the answer, such as [`Meta::cache_hit`] before replaying a
+    /// cached answer. Call it before the first text. The server passes it on to askers that read
+    /// it and folds it into the final [`Finish::meta`].
+    pub fn meta(&self, meta: Meta) {
+        let _ = self.tx.send(Piece::Meta(meta));
+    }
 }
 
 /// What serves an infer/2 request: a model, or an inference node's routing to model nodes.
@@ -585,6 +630,12 @@ pub trait EmbedBackend: Send + Sync {
     fn name(&self) -> String;
 
     async fn embed(&self, input: &str, cancel: &CancelToken) -> Result<Vec<f32>, RemoteError>;
+
+    /// The vector and the prompt tokens it took, if the backend knows them. The server sums the
+    /// counts into the reply's [`Finish::usage`]. Default: [`embed`](Self::embed), no count.
+    async fn embed_counted(&self, input: &str, cancel: &CancelToken) -> Result<(Vec<f32>, Option<u64>), RemoteError> {
+        Ok((self.embed(input, cancel).await?, None))
+    }
 }
 
 /// An [`InferBackend`] over a [`ModelBackend`]: inline messages and tools only, no resume;
@@ -606,8 +657,10 @@ impl InferBackend for ModelAdapter {
     }
 
     async fn infer(&self, request: &Request, out: &Output, cancel: &CancelToken) -> Result<Finish, RemoteError> {
-        let Some(messages) = request.inline_messages() else {
-            return Err(RemoteError::unavailable("this node keeps no conversations; send the messages"));
+        let messages = match &request.input {
+            Input::Messages(m) => m,
+            Input::Prompt(_) => return Err(RemoteError::Unsupported { message: "this backend takes messages, not a raw prompt".into() }),
+            _ => return Err(RemoteError::unavailable("this node keeps no conversations; send the messages")),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sink = DeltaSink::new(Some(tx));
@@ -697,6 +750,9 @@ async fn serve_infer(mut ch: Channel, caller: Caller, host: &dyn InferHost, admi
     let id = request.id.clone();
     let caller = caller.presenting(request.cert.take());
     let checked = host.authorize(&caller).and_then(|()| {
+        if matches!(request.input, Input::Prompt(_)) && !request.tools.is_empty() {
+            return Err(RemoteError::BadRequest { message: "a raw prompt takes no tools".into() });
+        }
         if request.raw && matches!(request.input, Input::Context(_)) {
             return Err(RemoteError::BadRequest { message: "raw mode takes assembled messages, not a context_ref".into() });
         }
@@ -725,7 +781,8 @@ async fn serve_infer(mut ch: Channel, caller: Caller, host: &dyn InferHost, admi
 
     let (out, mut pieces) = Output::channel();
     let cancel = CancelToken::new();
-    let mut framer = Framer { id: id.clone(), text_at, reasoning_at, calls: 0, accepted, first_token: None };
+    let mut framer =
+        Framer { id: id.clone(), text_at, reasoning_at, calls: 0, accepted, first_token: None, early_meta: request.early_meta, meta: None };
     let mut run = pin!(backend.infer(&request, &out, &cancel));
     let mut asker_open = true;
     let mut send_failed = false;
@@ -733,7 +790,7 @@ async fn serve_infer(mut ch: Channel, caller: Caller, host: &dyn InferHost, admi
         tokio::select! {
             r = &mut run => break r,
             Some(p) = pieces.recv() => {
-                let f = framer.frame(p);
+                let Some(f) = framer.frame(p) else { continue };
                 if !send_failed && ch.send_cbor(&f).await.is_err() {
                     send_failed = true;
                     cancel.cancel();
@@ -756,12 +813,25 @@ async fn serve_infer(mut ch: Channel, caller: Caller, host: &dyn InferHost, admi
         return Ok(());
     }
     while let Ok(p) = pieces.try_recv() {
-        let f = framer.frame(p);
-        ch.send_cbor(&f).await?;
+        if let Some(f) = framer.frame(p) {
+            ch.send_cbor(&f).await?;
+        }
     }
     let reply = match result {
         Ok(mut finish) => {
             let meta = &mut finish.meta;
+            if let Some(early) = framer.meta.take() {
+                meta.cache_hit |= early.cache_hit;
+                if meta.served_by.is_none() {
+                    meta.served_by = early.served_by;
+                }
+                if meta.revision.is_none() {
+                    meta.revision = early.revision;
+                }
+                if meta.standin.is_none() {
+                    meta.standin = early.standin;
+                }
+            }
             meta.served_by.get_or_insert_with(|| backend.name());
             if let Some(p) = &prefix {
                 meta.resumed_from = Some(p.len);
@@ -785,12 +855,16 @@ struct Framer {
     calls: u32,
     accepted: Instant,
     first_token: Option<Duration>,
+    /// The asker reads `Meta` frames.
+    early_meta: bool,
+    /// Early metadata from the backend, folded into the final `Done`.
+    meta: Option<Meta>,
 }
 
 impl Framer {
-    fn frame(&mut self, p: Piece) -> ServerFrame {
+    fn frame(&mut self, p: Piece) -> Option<ServerFrame> {
         let id = self.id.clone();
-        match p {
+        Some(match p {
             Piece::Text(text) => {
                 self.first_token.get_or_insert_with(|| self.accepted.elapsed());
                 let offset = self.text_at;
@@ -808,7 +882,14 @@ impl Framer {
                 ServerFrame::ToolCall { id, index: self.calls - 1, call }
             }
             Piece::Usage(usage) => ServerFrame::Usage { id, usage },
-        }
+            Piece::Meta(meta) => {
+                self.meta = Some(meta.clone());
+                if !self.early_meta {
+                    return None;
+                }
+                ServerFrame::Meta { id, meta }
+            }
+        })
     }
 }
 
@@ -833,9 +914,10 @@ async fn serve_embed(
     let queued = started.elapsed();
     ch.send_cbor(&ServerFrame::Accepted { id: id.clone(), model: backend.name(), attempt: 0, resume: false }).await?;
     let cancel = CancelToken::new();
+    let mut tokens: Option<u64> = None;
     for (index, input) in request.inputs.iter().enumerate() {
         let vector = tokio::select! {
-            v = backend.embed(input, &cancel) => v,
+            v = backend.embed_counted(input, &cancel) => v,
             m = async { loop {
                 match ch.rx.recv().await {
                     Ok(Some(bytes)) if is_cancel(&bytes, &id) => return true,
@@ -848,11 +930,17 @@ async fn serve_embed(
             }
         };
         match vector {
-            Ok(v) => ch.send_cbor(&ServerFrame::Embedding { id: id.clone(), index: index as u32, vector: f32_bytes(&v) }).await?,
+            Ok((v, n)) => {
+                if let Some(n) = n {
+                    *tokens.get_or_insert(0) += n;
+                }
+                ch.send_cbor(&ServerFrame::Embedding { id: id.clone(), index: index as u32, vector: f32_bytes(&v) }).await?
+            }
             Err(error) => return ch.send_cbor(&ServerFrame::Failed { id, error }).await,
         }
     }
     let mut finish = Finish::new("stop");
+    finish.usage = tokens.map(|n| Usage::new(n, 0));
     finish.meta.served_by = Some(backend.name());
     finish.meta.timings.queued_ms = millis(queued);
     finish.meta.timings.total_ms = millis(started.elapsed());
