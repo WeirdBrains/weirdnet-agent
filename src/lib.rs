@@ -12,6 +12,8 @@
 //! - [`budget`]: searches, pages, concurrency and time limits.
 //! - [`trace`]: steps, citations and the cited-step check.
 //! - [`model`]: the model backend trait and chat messages.
+//! - [`remote`]: remote inference (offload a model turn to another node, with fallback) and
+//!   remote tasks (Node companions) over an app-supplied channel.
 //!
 //! Nothing here is app-specific: browser tools, panels and storage live in the app.
 
@@ -20,6 +22,7 @@ pub mod cancel;
 pub mod identity;
 pub mod model;
 pub mod policy;
+pub mod remote;
 pub mod session;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
