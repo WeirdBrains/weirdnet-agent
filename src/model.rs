@@ -12,6 +12,7 @@ use crate::tool::ToolSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Role {
     System,
     User,
@@ -65,6 +66,7 @@ pub struct ModelTurn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ModelError {
     #[error("model unavailable: {0}")]
     Unavailable(String),
@@ -93,6 +95,14 @@ impl DeltaSink {
     pub fn text(&self, delta: impl Into<String>) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(AgentEvent::TextDelta(delta.into()));
+        }
+    }
+
+    /// Reasoning ("thinking") text, streamed apart from the answer. It is shown but never part
+    /// of the turn's text.
+    pub fn reasoning(&self, delta: impl Into<String>) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(AgentEvent::ReasoningDelta(delta.into()));
         }
     }
 }

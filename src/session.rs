@@ -43,6 +43,7 @@ impl AgentConfig {
 /// The user's answer to an approval card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "answer")]
+#[non_exhaustive]
 pub enum ApprovalAnswer {
     Approve { scope: Scope },
     Deny,
@@ -75,6 +76,7 @@ pub trait Approver: Send + Sync {
 /// Why a task ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "stop")]
+#[non_exhaustive]
 pub enum StopReason {
     Completed,
     Cancelled,
@@ -84,11 +86,15 @@ pub enum StopReason {
 
 /// Streamed to the UI while a task runs.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AgentEvent {
     TaskStarted {
         task_id: String,
     },
     TextDelta(String),
+    /// Reasoning text from the model ([`DeltaSink::reasoning`](crate::DeltaSink::reasoning)),
+    /// shown apart from the answer.
+    ReasoningDelta(String),
     ApprovalRequested(ApprovalPrompt),
     /// An approval skipped by a standing allow: show a notice with Stop.
     ApprovalSkipped(SkipNotice),

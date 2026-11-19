@@ -20,6 +20,7 @@ pub struct StepId(pub u32);
 /// Which browsing session a step used.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "session")]
+#[non_exhaustive]
 pub enum SessionMark {
     #[default]
     LoggedOut,
@@ -31,6 +32,7 @@ pub enum SessionMark {
 /// How an approval was resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
+#[non_exhaustive]
 pub enum ApprovalOutcome {
     Approved {
         scope: Scope,
@@ -47,6 +49,7 @@ pub enum ApprovalOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[non_exhaustive]
 pub enum StepKind {
     Model { model: String, tool_calls: u32 },
     Search { provider: String, query: String, results: u32 },
@@ -132,6 +135,7 @@ pub struct TraceSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
+#[non_exhaustive]
 pub enum CitationTarget {
     Url { url: String, quote: Option<String> },
     ToolResult { source: String, tool: String },
@@ -147,6 +151,7 @@ pub struct Citation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case", tag = "error")]
+#[non_exhaustive]
 pub enum CitationError {
     #[error("citation [{n}] names no steps")]
     NoSteps { n: u32 },

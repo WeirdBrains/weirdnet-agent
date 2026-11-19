@@ -12,17 +12,30 @@
 //! - [`budget`]: searches, pages, concurrency and time limits.
 //! - [`trace`]: steps, citations and the cited-step check.
 //! - [`model`]: the model backend trait and chat messages.
-//! - [`remote`]: remote inference (offload a model turn to another node, with fallback) and
-//!   remote tasks (Node companions) over an app-supplied channel.
+//! - [`remote`]: protocols between one user's nodes over an app-supplied channel: inference
+//!   (`infer/2` with priorities, queueing, reasoning, tool calls, embeddings and resume; `infer/1`
+//!   kept for 0.3 nodes), the model catalog, remote tasks (Node companions), and the
+//!   transport-neutral [`remote::pool::Pool`] that fails over and resumes answers across nodes.
+//! - `pool` (feature): the pool over Weirdnet: inference nodes among the user's linked devices.
+//! - `serve` (feature): serve inference and the catalog on a Weirdnet node, checking callers
+//!   against the device roster.
 //!
 //! Nothing here is app-specific: browser tools, panels and storage live in the app.
+//!
+//! Public enums are `#[non_exhaustive]`: match them with a wildcard arm.
 
 pub mod budget;
 pub mod cancel;
 pub mod identity;
 pub mod model;
+#[cfg(any(feature = "pool", feature = "serve"))]
+mod net;
 pub mod policy;
+#[cfg(feature = "pool")]
+pub mod pool;
 pub mod remote;
+#[cfg(feature = "serve")]
+pub mod serve;
 pub mod session;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -37,6 +50,7 @@ pub use policy::{
     ActionRequest, AllowRule, ApprovalPrompt, CompanionScope, Decision, DenyReason, Policy, PolicyError, Scope, SharedPolicy, SiteLevel, SkipNotice,
     StandingAllow, TaskApprovals, Tier, site_of,
 };
+pub use remote::{Authorize, Caller, RemoteError};
 pub use session::{AgentConfig, AgentEvent, AgentSession, ApprovalAnswer, Approver, Outcome, PagesPrompt, StopReason};
 pub use tool::{
     BudgetCharge, CallTarget, LocalTools, RegistryError, SourceKind, Tool, ToolAnnotations, ToolContext, ToolError, ToolOutput, ToolRegistry,

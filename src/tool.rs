@@ -20,6 +20,7 @@ use crate::trace::{SessionMark, StepKind};
 /// Which budget counter a call draws from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BudgetCharge {
     #[default]
     None,
@@ -146,6 +147,7 @@ impl ToolOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case", tag = "error", content = "detail")]
+#[non_exhaustive]
 pub enum ToolError {
     #[error("unknown tool {0}")]
     NotFound(String),
@@ -177,6 +179,7 @@ pub trait Tool: Send + Sync {
 /// Where tools come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SourceKind {
     Local,
     Mcp,
@@ -241,6 +244,7 @@ impl ToolSource for LocalTools {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RegistryError {
     #[error("tool {tool} is offered by both {first} and {second}")]
     Duplicate { tool: String, first: String, second: String },

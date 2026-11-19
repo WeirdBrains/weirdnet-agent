@@ -34,12 +34,19 @@ pub fn memory_pair() -> (Channel, Channel) {
 
 type Handler = Arc<dyn Fn(Channel, String) + Send + Sync>;
 
+#[derive(Clone)]
+struct Route {
+    /// `None`: every protocol.
+    protocols: Option<Vec<String>>,
+    handler: Handler,
+}
+
 /// A [`Dialer`] over [`memory_pair`]: each routed node gets a handler that receives the serving
 /// end and the protocol (it usually spawns [`super::infer::serve`] or [`super::task::serve`]).
 /// Nodes without a route are unreachable.
 #[derive(Default, Clone)]
 pub struct MemoryDialer {
-    routes: Arc<Mutex<HashMap<String, Handler>>>,
+    routes: Arc<Mutex<HashMap<String, Route>>>,
 }
 
 impl MemoryDialer {
@@ -48,7 +55,14 @@ impl MemoryDialer {
     }
 
     pub fn route(&self, node: &str, handler: impl Fn(Channel, String) + Send + Sync + 'static) {
-        self.routes.lock().unwrap().insert(node.to_string(), Arc::new(handler));
+        self.routes.lock().unwrap().insert(node.to_string(), Route { protocols: None, handler: Arc::new(handler) });
+    }
+
+    /// Like [`route`](Self::route), but the node serves only `protocols`; opening another one
+    /// fails with [`RemoteError::Unsupported`] (like an older node).
+    pub fn route_only(&self, node: &str, protocols: &[&str], handler: impl Fn(Channel, String) + Send + Sync + 'static) {
+        let protocols = Some(protocols.iter().map(|p| p.to_string()).collect());
+        self.routes.lock().unwrap().insert(node.to_string(), Route { protocols, handler: Arc::new(handler) });
     }
 
     pub fn unroute(&self, node: &str) {
@@ -59,12 +73,15 @@ impl MemoryDialer {
 #[async_trait]
 impl Dialer for MemoryDialer {
     async fn open(&self, node: &str, protocol: &str) -> Result<Channel, RemoteError> {
-        let handler = self.routes.lock().unwrap().get(node).cloned();
-        let Some(handler) = handler else {
+        let route = self.routes.lock().unwrap().get(node).cloned();
+        let Some(route) = route else {
             return Err(RemoteError::Unreachable { message: format!("{node} is not reachable") });
         };
+        if route.protocols.as_ref().is_some_and(|p| !p.iter().any(|p| p == protocol)) {
+            return Err(RemoteError::Unsupported { message: format!("{node} does not accept {protocol}") });
+        }
         let (ours, theirs) = memory_pair();
-        handler(theirs, protocol.to_string());
+        (route.handler)(theirs, protocol.to_string());
         Ok(ours)
     }
 }

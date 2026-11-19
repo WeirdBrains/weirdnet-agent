@@ -58,6 +58,7 @@ impl TaskRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "msg")]
+#[non_exhaustive]
 pub enum ClientMsg {
     Run { request: TaskRequest },
     Answer { ask: u64, answer: ApprovalAnswer },
@@ -66,6 +67,7 @@ pub enum ClientMsg {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "msg")]
+#[non_exhaustive]
 pub enum ServerMsg {
     Started { task_id: String },
     Delta { text: String },
@@ -111,6 +113,8 @@ fn wire_event(ev: AgentEvent) -> Option<ServerMsg> {
     Some(match ev {
         AgentEvent::TaskStarted { task_id } => ServerMsg::Started { task_id },
         AgentEvent::TextDelta(text) => ServerMsg::Delta { text },
+        // task/1 peers (0.3 and older) know no reasoning message; it stays on the serving node.
+        AgentEvent::ReasoningDelta(_) => return None,
         // The Ask message carries the prompt with the tool.
         AgentEvent::ApprovalRequested(_) => return None,
         AgentEvent::ApprovalSkipped(notice) => ServerMsg::Skipped { notice },

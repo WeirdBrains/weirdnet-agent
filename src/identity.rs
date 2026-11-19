@@ -28,6 +28,7 @@ impl fmt::Display for AgentId {
 /// Where an agent runs relative to the app hosting the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AgentKind {
     /// Runs on this machine.
     Local,

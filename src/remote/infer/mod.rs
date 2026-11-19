@@ -1,5 +1,9 @@
 //! Remote inference: one model turn on another of the user's nodes.
 //!
+//! Two protocol versions, served side by side:
+//!
+//! - **`/weirdnet-agent/infer/1`** ([`PROTOCOL`], JSON), unchanged on the wire:
+//!
 //! ```text
 //! asking node                      serving node
 //!   Infer { id, model, messages, tools } ->
@@ -9,10 +13,22 @@
 //!                                  <- Done { turn } | Failed { error } | Cancelled
 //! ```
 //!
-//! [`RemoteModel`] is a [`ModelBackend`] over this protocol. It tries its nodes in order and
-//! then its local fallback, moving on whenever a node fails before any token has streamed
-//! (unreachable, busy, no model, an error, or no `Accepted` within the accept timeout). Once
-//! tokens have streamed a failure is returned as is: the text already shown cannot be taken back.
+//! - **`/weirdnet-agent/infer/2`** ([`v2`], CBOR): a priority queue with `Queued`, jobs and
+//!   attempts, resume from an assistant prefix, offsets, reasoning and tool-call frames, usage,
+//!   metadata, raw mode and embeddings.
+//!
+//! Serving: the app accepts streams of each protocol and hands them, with the transport peer as
+//! a [`Caller`], to [`serve`] or [`v2::serve`]; both ask [`InferHost::authorize`] first and pass
+//! the caller to [`InferHost::open`]. The `serve` cargo feature does this over `weirdnet-net`.
+//!
+//! [`RemoteModel`] is a [`ModelBackend`] over a [`Pool`]: it tries its nodes in order (infer/2,
+//! or infer/1 on older nodes) and then its local fallback, moving on whenever a node fails
+//! before any token has streamed. Once tokens have streamed a failure is returned as is (the
+//! text already shown cannot be taken back) unless resume is turned on with
+//! [`RemoteModel::with_resume`].
+
+mod queue;
+pub mod v2;
 
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
@@ -20,21 +36,25 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::mpsc;
 
-use super::{Channel, Dialer, RemoteError, request_id};
+pub use queue::{Admission, Permit, Ticket, Turn};
+
+use super::pool::{Pool, PoolOptions};
+use super::{Caller, Channel, Dialer, RemoteError};
 use crate::cancel::CancelToken;
 use crate::model::{DeltaSink, Message, ModelBackend, ModelError, ModelTurn};
 use crate::session::AgentEvent;
 use crate::tool::ToolSpec;
 
-/// Stream protocol id for remote inference.
+/// Stream protocol id of infer/1.
 pub const PROTOCOL: &str = "/weirdnet-agent/infer/1";
 
-/// How long a node has to accept a turn before the next one is tried.
+/// How long a node has to accept a turn before the next one is tried. On infer/2 every
+/// `Queued` frame starts it again.
 pub const DEFAULT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// One model turn to run elsewhere.
+/// One model turn to run elsewhere (infer/1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InferRequest {
     pub id: String,
@@ -46,17 +66,19 @@ pub struct InferRequest {
     pub tools: Vec<ToolSpec>,
 }
 
-/// Asking node to serving node.
+/// Asking node to serving node (infer/1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "msg")]
+#[non_exhaustive]
 pub enum ClientMsg {
     Infer { request: InferRequest },
     Cancel { id: String },
 }
 
-/// Serving node to asking node.
+/// Serving node to asking node (infer/1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "msg")]
+#[non_exhaustive]
 pub enum ServerMsg {
     Accepted { id: String, model: String },
     Delta { id: String, text: String },
@@ -65,50 +87,56 @@ pub enum ServerMsg {
     Cancelled { id: String },
 }
 
-/// What the serving app offers: a backend for a requested model.
+/// What the serving app offers.
 pub trait InferHost: Send + Sync {
-    fn open(&self, model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError>;
-}
+    /// Whether `caller` may use this node at all (for Weirdnet: a linked device, see
+    /// `serve::RosterAuth`). Called before anything else on every request.
+    fn authorize(&self, caller: &Caller) -> Result<(), RemoteError>;
 
-/// How many turns a node serves at once; more are answered `Busy` so the asker moves on.
-#[derive(Clone)]
-pub struct Admission {
-    slots: Arc<Semaphore>,
-}
+    /// A backend for a requested model (infer/1, and infer/2 through the default
+    /// [`open_request`](Self::open_request)).
+    fn open(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError>;
 
-impl Admission {
-    pub fn new(max_concurrent: usize) -> Self {
-        Self { slots: Arc::new(Semaphore::new(max_concurrent)) }
+    /// The backend for one infer/2 request. The default wraps [`open`](Self::open) in a
+    /// [`v2::ModelAdapter`]: inline messages and tools, no resume. Inference nodes route here.
+    fn open_request(&self, caller: &Caller, request: &v2::Request) -> Result<Arc<dyn v2::InferBackend>, RemoteError> {
+        Ok(Arc::new(v2::ModelAdapter::new(self.open(caller, request.model.as_deref())?)))
     }
 
-    fn try_take(&self) -> Option<OwnedSemaphorePermit> {
-        self.slots.clone().try_acquire_owned().ok()
+    /// The backend for embeddings (infer/2). Default: none here.
+    fn open_embed(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn v2::EmbedBackend>, RemoteError> {
+        let _ = (caller, model);
+        Err(RemoteError::unavailable("no embedding model on this node"))
     }
 }
 
-fn model_error(e: ModelError) -> RemoteError {
+pub(crate) fn model_error(e: ModelError) -> RemoteError {
     match e {
         ModelError::Unavailable(m) => RemoteError::Unavailable { message: m },
         ModelError::Failed(m) => RemoteError::Failed { message: m },
-        ModelError::Cancelled => RemoteError::Failed { message: "cancelled".into() },
+        ModelError::Cancelled => RemoteError::Cancelled,
     }
 }
 
-/// Serve one inference request on an accepted channel. The caller has already checked that the
-/// far end is a linked device. Returns when the turn is done, failed or cancelled; if the asker
-/// goes away the turn is cancelled.
-pub async fn serve(mut ch: Channel, host: &dyn InferHost, admission: &Admission) -> Result<(), RemoteError> {
+/// Serve one infer/1 request on an accepted channel. `caller` is the transport-authenticated
+/// peer; the host authorizes it first and gets it in [`InferHost::open`]. Returns when the turn
+/// is done, failed or cancelled; if the asker goes away the turn is cancelled. Infer/1 never
+/// queues: with no free slot the answer is `Busy`.
+pub async fn serve(mut ch: Channel, caller: &Caller, host: &dyn InferHost, admission: &Admission) -> Result<(), RemoteError> {
     let request = match ch.recv::<ClientMsg>().await? {
         Some(ClientMsg::Infer { request }) => request,
         Some(ClientMsg::Cancel { .. }) | None => return Ok(()),
     };
     let id = request.id.clone();
+    if let Err(error) = host.authorize(caller) {
+        return ch.send(&ServerMsg::Failed { id, error: error.for_v1() }).await;
+    }
     let Some(_permit) = admission.try_take() else {
         return ch.send(&ServerMsg::Failed { id, error: RemoteError::Busy }).await;
     };
-    let backend = match host.open(request.model.as_deref()) {
+    let backend = match host.open(caller, request.model.as_deref()) {
         Ok(b) => b,
-        Err(error) => return ch.send(&ServerMsg::Failed { id, error }).await,
+        Err(error) => return ch.send(&ServerMsg::Failed { id, error: error.for_v1() }).await,
     };
     ch.send(&ServerMsg::Accepted { id: id.clone(), model: backend.name() }).await?;
 
@@ -156,13 +184,14 @@ pub async fn serve(mut ch: Channel, host: &dyn InferHost, admission: &Admission)
     let reply = match result {
         Ok(turn) => ServerMsg::Done { id, turn },
         Err(_) if cancel.is_cancelled() => ServerMsg::Cancelled { id },
-        Err(e) => ServerMsg::Failed { id, error: model_error(e) },
+        Err(e) => ServerMsg::Failed { id, error: model_error(e).for_v1() },
     };
     ch.send(&reply).await
 }
 
 /// Where the last turn of a [`RemoteModel`] ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Route {
     /// On this node, by the model name it reported.
     Node { node: String, model: String },
@@ -170,28 +199,27 @@ pub enum Route {
     Fallback,
 }
 
-enum Attempt {
-    Cancelled,
-    /// Failed before any token streamed: try the next node.
-    Before(RemoteError),
-    /// Failed after tokens streamed.
-    Streamed(RemoteError),
-}
-
-/// A [`ModelBackend`] that runs turns on the user's other nodes, with fallback.
+/// A [`ModelBackend`] that runs turns on the user's other nodes, with fallback: a thin layer
+/// over a [`Pool`] with resume off by default.
 pub struct RemoteModel {
-    dialer: Arc<dyn Dialer>,
+    pool: Pool,
     nodes: Vec<String>,
     model: Option<String>,
     fallback: Option<Arc<dyn ModelBackend>>,
-    accept_timeout: Duration,
     last: Mutex<Option<Route>>,
 }
 
 impl RemoteModel {
     /// Tries `nodes` in order.
     pub fn new(dialer: Arc<dyn Dialer>, nodes: Vec<String>) -> Self {
-        Self { dialer, nodes, model: None, fallback: None, accept_timeout: DEFAULT_ACCEPT_TIMEOUT, last: Mutex::new(None) }
+        let opts = PoolOptions::default().with_resume(false);
+        Self::over(Pool::new(dialer, nodes.clone()).with_options(opts), nodes)
+    }
+
+    /// Over a pool the app has set up (for example with discovery from the `pool` feature).
+    /// `nodes` is only used for [`nodes`](Self::nodes) and the name before the first turn.
+    pub fn over(pool: Pool, nodes: Vec<String>) -> Self {
+        Self { pool, nodes, model: None, fallback: None, last: Mutex::new(None) }
     }
 
     /// Ask the nodes for this model id instead of their default.
@@ -207,8 +235,19 @@ impl RemoteModel {
     }
 
     pub fn with_accept_timeout(mut self, timeout: Duration) -> Self {
-        self.accept_timeout = timeout;
+        self.pool.options_mut().accept_timeout = timeout;
         self
+    }
+
+    /// Continue an answer on another node when one fails mid-answer (infer/2 nodes that can
+    /// resume). Off by default.
+    pub fn with_resume(mut self, on: bool) -> Self {
+        self.pool.options_mut().resume = on;
+        self
+    }
+
+    pub fn pool(&self) -> &Pool {
+        &self.pool
     }
 
     pub fn nodes(&self) -> &[String] {
@@ -222,70 +261,6 @@ impl RemoteModel {
 
     fn set_last(&self, route: Route) {
         *self.last.lock().unwrap_or_else(|e| e.into_inner()) = Some(route);
-    }
-
-    async fn attempt(
-        &self,
-        node: &str,
-        messages: &[Message],
-        tools: &[ToolSpec],
-        deltas: &DeltaSink,
-        cancel: &CancelToken,
-    ) -> Result<ModelTurn, Attempt> {
-        let open = tokio::select! {
-            r = tokio::time::timeout(self.accept_timeout, self.dialer.open(node, PROTOCOL)) => r,
-            _ = cancel.cancelled() => return Err(Attempt::Cancelled),
-        };
-        let mut ch = match open {
-            Ok(Ok(ch)) => ch,
-            Ok(Err(e)) => return Err(Attempt::Before(e)),
-            Err(_) => return Err(Attempt::Before(RemoteError::Timeout)),
-        };
-        let id = request_id();
-        let request = InferRequest { id: id.clone(), model: self.model.clone(), messages: messages.to_vec(), tools: tools.to_vec() };
-        if let Err(e) = ch.send(&ClientMsg::Infer { request }).await {
-            return Err(Attempt::Before(e));
-        }
-        let mut accepted: Option<String> = None;
-        let mut streamed = false;
-        let fail = |streamed: bool, e: RemoteError| if streamed { Attempt::Streamed(e) } else { Attempt::Before(e) };
-        loop {
-            let next = tokio::select! {
-                _ = cancel.cancelled() => {
-                    let _ = ch.send(&ClientMsg::Cancel { id: id.clone() }).await;
-                    return Err(Attempt::Cancelled);
-                }
-                m = async {
-                    if accepted.is_some() {
-                        Ok(ch.recv::<ServerMsg>().await)
-                    } else {
-                        tokio::time::timeout(self.accept_timeout, ch.recv::<ServerMsg>()).await
-                    }
-                } => m,
-            };
-            let msg = match next {
-                Err(_) => return Err(fail(streamed, RemoteError::Timeout)),
-                Ok(Err(e)) => return Err(fail(streamed, e)),
-                Ok(Ok(None)) => return Err(fail(streamed, RemoteError::Closed)),
-                Ok(Ok(Some(m))) => m,
-            };
-            match msg {
-                ServerMsg::Accepted { id: rid, model } if rid == id => accepted = Some(model),
-                ServerMsg::Delta { id: rid, text } if rid == id && accepted.is_some() => {
-                    streamed = true;
-                    deltas.text(text);
-                }
-                ServerMsg::Done { id: rid, turn } if rid == id && accepted.is_some() => {
-                    self.set_last(Route::Node { node: node.to_string(), model: accepted.unwrap_or_default() });
-                    return Ok(turn);
-                }
-                ServerMsg::Failed { id: rid, error } if rid == id => return Err(fail(streamed, error)),
-                ServerMsg::Cancelled { id: rid } if rid == id => {
-                    return Err(fail(streamed, RemoteError::Failed { message: "cancelled by the node".into() }));
-                }
-                other => return Err(fail(streamed, RemoteError::protocol(format!("unexpected message {other:?}")))),
-            }
-        }
     }
 }
 
@@ -301,17 +276,21 @@ impl ModelBackend for RemoteModel {
     }
 
     async fn complete(&self, messages: &[Message], tools: &[ToolSpec], deltas: &DeltaSink, cancel: &CancelToken) -> Result<ModelTurn, ModelError> {
-        let mut tried = Vec::new();
-        for node in &self.nodes {
-            if cancel.is_cancelled() {
-                return Err(ModelError::Cancelled);
+        let mut request = v2::Request::messages(messages.to_vec()).with_tools(tools.to_vec());
+        request.model.clone_from(&self.model);
+        let err = match self.pool.infer(request, deltas, cancel).await {
+            Ok(answer) => {
+                self.set_last(Route::Node { node: answer.node.clone(), model: answer.model.clone() });
+                return Ok(answer.turn());
             }
-            match self.attempt(node, messages, tools, deltas, cancel).await {
-                Ok(turn) => return Ok(turn),
-                Err(Attempt::Cancelled) => return Err(ModelError::Cancelled),
-                Err(Attempt::Streamed(e)) => return Err(ModelError::Failed(format!("{node}: {e}"))),
-                Err(Attempt::Before(e)) => tried.push(format!("{node}: {e}")),
-            }
+            Err(e) => e,
+        };
+        if err.error == RemoteError::Cancelled {
+            return Err(ModelError::Cancelled);
+        }
+        if err.streamed() {
+            let node = err.tried.last().map(|(n, _)| n.as_str()).unwrap_or("remote");
+            return Err(ModelError::Failed(format!("{node}: {}", err.error)));
         }
         if let Some(fallback) = &self.fallback {
             let r = fallback.complete(messages, tools, deltas, cancel).await;
@@ -320,10 +299,31 @@ impl ModelBackend for RemoteModel {
             }
             return r;
         }
-        if tried.is_empty() {
+        if err.tried.is_empty() {
             return Err(ModelError::Unavailable("no node to run on".into()));
         }
-        Err(ModelError::Unavailable(tried.join("; ")))
+        Err(ModelError::Unavailable(err.tried.iter().map(|(n, e)| format!("{n}: {e}")).collect::<Vec<_>>().join("; ")))
+    }
+}
+
+#[cfg(test)]
+mod v2_tests;
+
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+
+    /// A host over one model backend that admits everyone but "stranger".
+    pub(super) struct ModelHost(pub Arc<dyn ModelBackend>);
+
+    impl InferHost for ModelHost {
+        fn authorize(&self, caller: &Caller) -> Result<(), RemoteError> {
+            if caller.peer == "stranger" { Err(RemoteError::refused("unknown-device")) } else { Ok(()) }
+        }
+
+        fn open(&self, _caller: &Caller, _model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
+            Ok(self.0.clone())
+        }
     }
 }
 
@@ -340,7 +340,11 @@ mod tests {
     }
 
     impl InferHost for Host {
-        fn open(&self, model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
+        fn authorize(&self, caller: &Caller) -> Result<(), RemoteError> {
+            if caller.peer == "stranger" { Err(RemoteError::refused("unknown-device")) } else { Ok(()) }
+        }
+
+        fn open(&self, _caller: &Caller, model: Option<&str>) -> Result<Arc<dyn ModelBackend>, RemoteError> {
             match (&self.model, model) {
                 (_, Some(m)) if m != "gemma" => Err(RemoteError::Unavailable { message: format!("no {m} here") }),
                 (Some(b), _) => Ok(b.clone()),
@@ -356,11 +360,15 @@ mod tests {
     fn serving(dialer: &MemoryDialer, node: &str, model: Option<Arc<dyn ModelBackend>>, admission: Admission) {
         let host = Arc::new(Host { model });
         dialer.route(node, move |ch, protocol| {
-            assert_eq!(protocol, PROTOCOL);
             let host = host.clone();
             let admission = admission.clone();
             tokio::spawn(async move {
-                let _ = serve(ch, host.as_ref(), &admission).await;
+                let caller = Caller::new("phone");
+                let _ = match protocol.as_str() {
+                    PROTOCOL => serve(ch, &caller, host.as_ref(), &admission).await,
+                    v2::PROTOCOL => v2::serve(ch, caller, host.as_ref(), &admission).await,
+                    other => panic!("{other}"),
+                };
             });
         });
     }
@@ -483,7 +491,7 @@ mod tests {
     async fn a_failure_after_tokens_streamed_does_not_fall_back() {
         // A node that accepts, streams a token, then drops the channel.
         let dialer = MemoryDialer::new();
-        dialer.route("flaky", |mut ch, _| {
+        dialer.route_only("flaky", &[PROTOCOL], |mut ch, _| {
             tokio::spawn(async move {
                 let Ok(Some(ClientMsg::Infer { request })) = ch.recv::<ClientMsg>().await else { return };
                 let _ = ch.send(&ServerMsg::Accepted { id: request.id.clone(), model: "m".into() }).await;
@@ -513,7 +521,7 @@ mod tests {
         let cancelled = Arc::new(AtomicUsize::new(0));
         let host = Host { model: Some(Arc::new(Slow { cancelled: cancelled.clone() })) };
         let (mut ours, theirs) = memory_pair();
-        let server = tokio::spawn(async move { serve(theirs, &host, &Admission::new(1)).await });
+        let server = tokio::spawn(async move { serve(theirs, &Caller::new("phone"), &host, &Admission::new(1)).await });
         ours.send(&ClientMsg::Infer { request: InferRequest { id: "1".into(), model: None, messages: vec![], tools: vec![] } }).await.unwrap();
         assert!(matches!(ours.recv::<ServerMsg>().await.unwrap(), Some(ServerMsg::Accepted { .. })));
         assert!(matches!(ours.recv::<ServerMsg>().await.unwrap(), Some(ServerMsg::Delta { .. })));

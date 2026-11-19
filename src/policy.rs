@@ -27,6 +27,7 @@ use crate::identity::{AgentId, AgentIdentity, AgentKind};
 /// How much a tool can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Tier {
     /// Tier 0: reads only what the user attached.
     Read,
@@ -74,6 +75,7 @@ impl Tier {
 /// Per-companion, per-site permission level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SiteLevel {
     Off,
     #[default]
@@ -84,6 +86,7 @@ pub enum SiteLevel {
 /// Which companions a standing allow covers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CompanionScope {
     One(AgentId),
     All,
@@ -92,6 +95,7 @@ pub enum CompanionScope {
 /// What a standing allow skips approval for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "tier")]
+#[non_exhaustive]
 pub enum AllowRule {
     /// Navigate on one site, or everywhere when `site` is `None`.
     Navigate { site: Option<String> },
@@ -111,6 +115,7 @@ pub struct StandingAllow {
 /// What the user picked on an approval card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "scope")]
+#[non_exhaustive]
 pub enum Scope {
     /// Just this step.
     Once,
@@ -183,6 +188,7 @@ pub struct SkipNotice {
 /// Why a step can't run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case", tag = "reason")]
+#[non_exhaustive]
 pub enum DenyReason {
     #[error("this kind of action is never available to agents")]
     Never,
@@ -202,6 +208,7 @@ pub struct ApprovalPrompt {
 
 /// Result of evaluating one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Decision {
     Allow,
     AllowWithNotice(SkipNotice),
@@ -210,6 +217,7 @@ pub enum Decision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PolicyError {
     #[error("scope {0:?} is not offered for this request")]
     ScopeNotOffered(Scope),

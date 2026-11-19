@@ -45,6 +45,7 @@ impl Default for Budget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[non_exhaustive]
 pub enum BudgetExceeded {
     #[error("search budget used ({limit} searches)")]
     Searches { limit: u32 },
