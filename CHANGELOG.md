@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
 ### Added
 
 - `remote` module: protocols between one user's own nodes over an app-supplied `Dialer` and
