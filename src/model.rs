@@ -111,7 +111,7 @@ impl DeltaSink {
 /// sampling and stream text through `deltas`.
 #[async_trait]
 pub trait ModelBackend: Send + Sync {
-    /// Shown in traces, for example `gemma-4-e4b@desktop`.
+    /// Shown in traces, for example `gemma-4-e4b@node-a`.
     fn name(&self) -> String;
 
     async fn complete(&self, messages: &[Message], tools: &[ToolSpec], deltas: &DeltaSink, cancel: &CancelToken) -> Result<ModelTurn, ModelError>;

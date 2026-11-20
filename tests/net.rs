@@ -121,8 +121,8 @@ fn infer2_catalog_failover_and_resume_over_weirdnet() {
     let app_cert = certify(&user, &app, "phone");
     let mut roster = Roster::new();
     roster.upsert(app_cert.clone());
-    roster.upsert(certify(&user, &b, "device-a"));
-    roster.upsert(certify(&user, &c, "device-b"));
+    roster.upsert(certify(&user, &b, "node-a"));
+    roster.upsert(certify(&user, &c, "node-b"));
     let roster = Arc::new(roster);
     let view: Arc<dyn Fn() -> Roster + Send + Sync> = {
         let r = roster.clone();
@@ -136,7 +136,7 @@ fn infer2_catalog_failover_and_resume_over_weirdnet() {
         feed.publish(vec![CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_replicas(2)]);
         let mut servers = Vec::new();
         let mut words = Vec::new();
-        for (n, name) in [(&b, "device-a"), (&c, "device-b")] {
+        for (n, name) in [(&b, "node-a"), (&c, "node-b")] {
             let w = Arc::new(Words { node: name, seen: Mutex::new(Vec::new()), cancelled: AtomicUsize::new(0) });
             words.push(w.clone());
             let host: Arc<dyn InferHost> = Arc::new(Host { auth: auth.clone(), words: w });
@@ -171,10 +171,10 @@ fn infer2_catalog_failover_and_resume_over_weirdnet() {
 
         // A whole answer over infer/2 from the first node.
         let a = pool.infer(Request::messages(vec![Message::user("hi")]), &weirdnet_agent::remote::pool::NoEvents, &CancelToken::new()).await.unwrap();
-        assert_eq!((a.text.as_str(), a.model.as_str()), ("Hello there world", "gemma@device-a"));
+        assert_eq!((a.text.as_str(), a.model.as_str()), ("Hello there world", "gemma@node-a"));
 
-        // Failover mid-answer: device-a goes away after two words; the pool cancels on the stall and
-        // resumes on device-b from the twelve characters already shown.
+        // Failover mid-answer: node-a goes away after two words; the pool cancels on the stall and
+        // resumes on node-b from the twelve characters already shown.
         let (tx, mut rx) = mpsc::unbounded_channel();
         let job = {
             let pool = pool.clone();
@@ -270,7 +270,7 @@ impl weirdnet_agent::remote::task::TaskHost for Tasks {
         approver: Arc<dyn weirdnet_agent::Approver>,
     ) -> Result<weirdnet_agent::AgentSession, RemoteError> {
         self.seen.lock().unwrap().push(caller.roles.clone());
-        let identity = weirdnet_agent::AgentIdentity::new("atlas", "Atlas", weirdnet_agent::AgentKind::Node).with_node("device-a");
+        let identity = weirdnet_agent::AgentIdentity::new("atlas", "Atlas", weirdnet_agent::AgentKind::Node).with_node("node-a");
         let tools = Arc::new(weirdnet_agent::tool::ToolRegistry::new());
         let policy = weirdnet_agent::policy::Policy::new().shared();
         Ok(weirdnet_agent::AgentSession::new(weirdnet_agent::AgentConfig::new(identity), Arc::new(Echo), tools, policy, approver))
@@ -294,7 +294,7 @@ fn tasks_are_admitted_by_roles_over_weirdnet() {
     let (app, node, stranger) = (start(), start(), start());
     let mut roster = Roster::new();
     roster.upsert(certify(&user, &app, "phone"));
-    roster.upsert(certify(&user, &node, "device-a"));
+    roster.upsert(certify(&user, &node, "node-a"));
     let view: Arc<dyn Fn() -> Roster + Send + Sync> = Arc::new(move || roster.clone());
     // The app device's grant: `ymir.app`, later `ymir.inference` too.
     let granted = Arc::new(Mutex::new(vec!["ymir.app".to_string()]));

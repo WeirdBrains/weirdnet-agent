@@ -454,7 +454,7 @@ mod tests {
     use crate::trace::{Citation, CitationTarget, validate_citations};
 
     fn atlas() -> AgentIdentity {
-        AgentIdentity::new("atlas", "Atlas", AgentKind::Local).with_node("desktop")
+        AgentIdentity::new("atlas", "Atlas", AgentKind::Local).with_node("node-a")
     }
 
     fn nav_tool() -> FnTool {
@@ -541,7 +541,7 @@ mod tests {
         assert!(tool_msg.content.starts_with("<untrusted_tool_result tool=\"page.text\">"));
         assert!(tool_msg.content.ends_with("[trace steps: 2]"));
         assert!(matches!(out.trace.steps[1].kind, StepKind::Tool { ref tool, .. } if tool == "page.text"));
-        assert_eq!(out.trace.steps[1].node.as_deref(), Some("desktop"));
+        assert_eq!(out.trace.steps[1].node.as_deref(), Some("node-a"));
     }
 
     #[tokio::test]

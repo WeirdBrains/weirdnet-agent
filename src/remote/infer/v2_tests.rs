@@ -190,7 +190,7 @@ fn shown(evs: &[PoolEvent]) -> String {
 async fn text_reasoning_tool_calls_usage_and_metadata_stream_in_order() {
     let dialer = MemoryDialer::new();
     let script = Script::new(
-        "gemma@device-b",
+        "gemma@node-b",
         false,
         vec![
             Step::Reasoning("let me "),
@@ -211,13 +211,13 @@ async fn text_reasoning_tool_calls_usage_and_metadata_stream_in_order() {
     assert_eq!(answer.tool_calls[0].name, "search");
     assert_eq!(answer.finish_reason.as_deref(), Some("stop"));
     assert_eq!(answer.usage, Some(Usage::new(3, 4)));
-    assert_eq!((answer.node.as_str(), answer.model.as_str()), ("inference", "gemma@device-b"));
-    assert_eq!(answer.meta.served_by.as_deref(), Some("gemma@device-b"));
+    assert_eq!((answer.node.as_str(), answer.model.as_str()), ("inference", "gemma@node-b"));
+    assert_eq!(answer.meta.served_by.as_deref(), Some("gemma@node-b"));
     assert!(answer.meta.resumes.is_empty() && answer.meta.resumed_from.is_none());
     let seen = script.seen();
     assert_eq!((seen[0].seed, seen[0].response_format.clone(), seen[0].attempt), (Some(7), Some(ResponseFormat::Json), 0));
     let evs = drain(&mut rx);
-    assert!(matches!(&evs[0], PoolEvent::Accepted { node, model, resume: false } if node == "inference" && model == "gemma@device-b"));
+    assert!(matches!(&evs[0], PoolEvent::Accepted { node, model, resume: false } if node == "inference" && model == "gemma@node-b"));
     assert_eq!(shown(&evs), "Héllo wörld");
     assert!(evs.contains(&PoolEvent::Usage(Usage::new(3, 2))));
 }

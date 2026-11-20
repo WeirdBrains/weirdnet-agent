@@ -232,7 +232,7 @@ mod tests {
                 is_error: false,
             },
             lo,
-            Some("desktop".into()),
+            Some("node-a".into()),
             4,
         );
         t.push(
@@ -290,7 +290,7 @@ mod tests {
     fn step_lookup_summary_and_fetched_urls() {
         let t = sample();
         assert!(t.step(StepId(0)).is_none());
-        assert_eq!(t.step(StepId(4)).unwrap().node.as_deref(), Some("desktop"));
+        assert_eq!(t.step(StepId(4)).unwrap().node.as_deref(), Some("node-a"));
         let s = t.summary();
         assert_eq!((s.steps, s.searches, s.pages, s.tool_calls), (5, 1, 2, 1));
         let urls = t.fetched_urls();

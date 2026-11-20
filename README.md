@@ -2,7 +2,7 @@
 
 > Note: this crate, `weirdnet-agent` (singular), is unrelated to the private `WeirdBrains/weirdnet-agents` repo (plural), which only holds the shared `AGENTS.md`.
 
-The shared agent runtime for WeirdBrains apps. Morph's Companions are its first user. Apps
+The shared agent runtime for [WeirdBrains](https://weirdbrains.com) apps. Morph's Companions are its first user. Apps
 supply a model, tools and an approval UI; this crate runs the loop, enforces the policy and
 records what happened.
 
