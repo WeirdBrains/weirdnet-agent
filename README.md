@@ -48,7 +48,9 @@ records what happened.
 Features:
 
 - `pool`: the pool over `weirdnet-net`: `LinkedNodes` finds inference nodes among the user's
-  linked devices (roster), `NetDialer` opens streams, `connect` builds the `Pool`.
+  linked devices (roster), `NetDialer` opens streams, `connect` builds the `Pool`. Known
+  inference nodes are returned at once; other devices are probed together in the background,
+  and unreachable ones are skipped for a while (`with_retry_after`).
 - `serve`: `Server` serves infer/1, infer/2 and catalog/1 on a `weirdnet-net` node and announces
   it; `RosterAuth` admits only linked devices (`weirdnet-sync` `Roster::check_caller`).
 - `testing`: `ScriptedModel`, `ScriptedApprover` and `FnTool` for downstream tests.

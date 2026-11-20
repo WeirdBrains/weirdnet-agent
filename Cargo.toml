@@ -18,7 +18,7 @@ default = []
 # Scripted model, approver and closure tools for tests in downstream crates.
 testing = []
 # App side over weirdnet-net: find inference nodes among the user's linked devices and dial them.
-pool = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures"]
+pool = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures", "dep:tracing"]
 # Inference side over weirdnet-net: accept infer/1, infer/2 and catalog/1 streams, and check
 # callers against the weirdnet-sync roster.
 serve = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures"]
@@ -32,6 +32,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 
 futures = { version = "0.3", optional = true }
+tracing = { version = "0.1", optional = true }
 weirdnet-net = { version = "0.8.0", optional = true }
 weirdnet-sync = { version = "0.5.2", optional = true }
 

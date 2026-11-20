@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `LinkedNodes::with_retry_after` (default 30 s): how long an unreachable linked device is skipped before it is probed again. A connection from it, a network change or resuming clears it sooner.
+
+### Fixed
+
+- `LinkedNodes::nodes` (called by every `Pool::infer` and `Pool::embed`) no longer waits `with_wait` for each offline or unreachable linked device in turn. Connected inference nodes are returned at once; other devices are probed concurrently in the background, a failed connect gives up at once, and only when no inference node is known does it wait, once, for all of them. Results are cached between calls, and the time each call took is logged at debug level.
+
 ## [0.4.2] - 2026-11-19
 
 ### Added
