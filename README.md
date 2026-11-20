@@ -61,7 +61,7 @@ public enums (`AgentEvent::ReasoningDelta` is new).
 
 Inference (`weirdnet-model`) and MCP client transports (`weirdnet-mcp`) are separate; the core
 only defines the traits and protocols they plug into, and only the `pool` and `serve` features
-depend on `weirdnet-net` and `weirdnet-sync`.
+depend on `weirdnet-net` and `weirdnet-sync` (0.5.2 or 0.6).
 
 ## License
 
