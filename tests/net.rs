@@ -249,3 +249,93 @@ fn infer2_catalog_failover_and_resume_over_weirdnet() {
     });
     drop(rt);
 }
+
+struct Tasks {
+    seen: Mutex<Vec<Option<Vec<String>>>>,
+}
+
+impl weirdnet_agent::remote::task::TaskHost for Tasks {
+    fn session(
+        &self,
+        _r: &weirdnet_agent::remote::task::TaskRequest,
+        _a: Arc<dyn weirdnet_agent::Approver>,
+    ) -> Result<weirdnet_agent::AgentSession, RemoteError> {
+        Err(RemoteError::refused("session_for is used"))
+    }
+
+    fn session_for(
+        &self,
+        caller: &weirdnet_agent::Admitted,
+        _r: &weirdnet_agent::remote::task::TaskRequest,
+        approver: Arc<dyn weirdnet_agent::Approver>,
+    ) -> Result<weirdnet_agent::AgentSession, RemoteError> {
+        self.seen.lock().unwrap().push(caller.roles.clone());
+        let identity = weirdnet_agent::AgentIdentity::new("atlas", "Atlas", weirdnet_agent::AgentKind::Node).with_node("device-a");
+        let tools = Arc::new(weirdnet_agent::tool::ToolRegistry::new());
+        let policy = weirdnet_agent::policy::Policy::new().shared();
+        Ok(weirdnet_agent::AgentSession::new(weirdnet_agent::AgentConfig::new(identity), Arc::new(Echo), tools, policy, approver))
+    }
+}
+
+struct Deny;
+
+#[async_trait]
+impl weirdnet_agent::Approver for Deny {
+    async fn decide(&self, _p: &weirdnet_agent::policy::ApprovalPrompt, _t: &ToolSpec) -> weirdnet_agent::ApprovalAnswer {
+        weirdnet_agent::ApprovalAnswer::Deny
+    }
+}
+
+#[test]
+fn tasks_are_admitted_by_roles_over_weirdnet() {
+    use weirdnet_agent::remote::task::{self, TaskRequest};
+    use weirdnet_agent::serve::{RoleView, ServingExtras};
+    let user = Keypair::generate_ed25519();
+    let (app, node, stranger) = (start(), start(), start());
+    let mut roster = Roster::new();
+    roster.upsert(certify(&user, &app, "phone"));
+    roster.upsert(certify(&user, &node, "device-a"));
+    let view: Arc<dyn Fn() -> Roster + Send + Sync> = Arc::new(move || roster.clone());
+    // The app device's grant: `ymir.app`, later `ymir.inference` too.
+    let granted = Arc::new(Mutex::new(vec!["ymir.app".to_string()]));
+    let roles: RoleView = {
+        let (g, app_peer) = (granted.clone(), app.peer_id().to_string());
+        Arc::new(move |peer: &str| (peer == app_peer).then(|| g.lock().unwrap().clone()))
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let auth = Arc::new(RosterAuth::new(&WEIRDNET, user.public(), view).require_roles(&["ymir.inference"], roles));
+        let host = Arc::new(Tasks { seen: Mutex::new(Vec::new()) });
+        let serving = Serving { infer: None, catalog: None, announce: true };
+        let _server = Server::start_with(&node, serving, ServingExtras::default().tasks(host.clone(), auth.clone())).unwrap();
+
+        let ask = |from: &Arc<N>| {
+            let dialer = NetDialer::new(from.clone());
+            dialer.hint(node.peer_id(), vec![addr(&node)]);
+            let peer = node.peer_id().to_string();
+            async move {
+                let req = TaskRequest::new(weirdnet_agent::AgentId::new("atlas"), "ping", vec![]);
+                task::run(&dialer, &peer, req, None, &Deny, &CancelToken::new()).await
+            }
+        };
+        let err = ask(&app).await.unwrap_err();
+        assert!(matches!(&err, RemoteError::Refused { message } if message.contains("role")), "{err:?}");
+        let err = ask(&stranger).await.unwrap_err();
+        assert!(matches!(&err, RemoteError::Refused { message } if message.contains("unknown-device")), "{err:?}");
+        assert!(host.seen.lock().unwrap().is_empty(), "refused before any session");
+
+        granted.lock().unwrap().push("ymir.inference".into());
+        let got = ask(&app).await.unwrap();
+        assert_eq!(got.outcome.text, "ping");
+        assert_eq!(*host.seen.lock().unwrap(), [Some(vec!["ymir.app".to_string(), "ymir.inference".to_string()])]);
+
+        // The default `admit` (a closure authorizer) knows no roles.
+        let open = |_c: &Caller| -> Result<(), RemoteError> { Ok(()) };
+        let who = open.admit(&Caller::new("p")).unwrap();
+        assert_eq!((who.peer.as_str(), who.roles.clone()), ("p", None));
+        assert!(!who.has_role("ymir.inference"));
+    });
+    for n in [app, node, stranger] {
+        n.halt();
+    }
+}

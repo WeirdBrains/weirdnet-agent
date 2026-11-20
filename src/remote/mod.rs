@@ -141,10 +141,38 @@ impl Caller {
     }
 }
 
+/// A caller an [`Authorize`] let in: its transport peer and, when the authorizer knows them, the
+/// device roles it holds (for Weirdnet, the user-signed grants in the `weirdnet-sync` roster).
+/// Hosts use it to scope a session per device or role ([`task::TaskHost::session_for`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Admitted {
+    pub peer: String,
+    /// `None` when the authorizer has no role information (no grant, or roles not checked).
+    pub roles: Option<Vec<String>>,
+}
+
+impl Admitted {
+    pub fn new(peer: impl Into<String>, roles: Option<Vec<String>>) -> Self {
+        Self { peer: peer.into(), roles }
+    }
+
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.as_ref().is_some_and(|r| r.iter().any(|x| x == role))
+    }
+}
+
 /// Decides whether a caller may use a served protocol. Hosts implement it (for Weirdnet with
 /// `serve::RosterAuth`); a closure works too.
 pub trait Authorize: Send + Sync {
     fn authorize(&self, caller: &Caller) -> Result<(), RemoteError>;
+
+    /// [`authorize`](Self::authorize), returning who was let in. The default knows no roles;
+    /// `serve::RosterAuth` fills them in.
+    fn admit(&self, caller: &Caller) -> Result<Admitted, RemoteError> {
+        self.authorize(caller)?;
+        Ok(Admitted::new(caller.peer.clone(), None))
+    }
 }
 
 impl<F> Authorize for F

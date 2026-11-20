@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Device roles: `RosterAuth::require_roles(any_of, RoleView)` admits only linked devices holding one of the roles (refusal `role`); `Authorize::admit` (default method) and `Admitted { peer, roles }`.
+- `TaskHost::session_for` (default calls `session`) and `task::serve_for(ch, caller, auth, host)`, which admits the caller before building its session.
+- `Server::start_with` and `ServingExtras::tasks`: serve task/1 on the node; task/1 is then listed in the `INFERENCE_APP` announcement.
+
+### Changed
+
+- The `pool` and `serve` features accept weirdnet-sync 0.5.2 up to 0.7 (`>=0.5.2, <0.8`).
+
 ## [0.4.3] - 2026-11-20
 
 ### Added

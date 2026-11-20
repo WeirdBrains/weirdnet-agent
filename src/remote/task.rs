@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Channel, Dialer, RemoteError, request_id};
+use super::{Admitted, Authorize, Caller, Channel, Dialer, RemoteError, request_id};
 use crate::cancel::CancelToken;
 use crate::identity::AgentId;
 use crate::model::Message;
@@ -85,6 +85,14 @@ pub enum ServerMsg {
 /// approver (which forwards cards to the asker). Refuse companions that do not run here.
 pub trait TaskHost: Send + Sync {
     fn session(&self, request: &TaskRequest, approver: Arc<dyn Approver>) -> Result<AgentSession, RemoteError>;
+
+    /// The session for an admitted caller ([`serve_for`]). Override it to scope tools, budget or
+    /// companions per device or role; the default ignores the caller and calls
+    /// [`session`](Self::session).
+    fn session_for(&self, caller: &Admitted, request: &TaskRequest, approver: Arc<dyn Approver>) -> Result<AgentSession, RemoteError> {
+        let _ = caller;
+        self.session(request, approver)
+    }
 }
 
 struct Ask {
@@ -128,15 +136,31 @@ fn wire_event(ev: AgentEvent) -> Option<ServerMsg> {
 }
 
 /// Serve one task on an accepted channel. The caller has already checked that the far end is a
-/// linked device. If the asker goes away the task is cancelled.
-pub async fn serve(mut ch: Channel, host: &dyn TaskHost) -> Result<(), RemoteError> {
+/// linked device (prefer [`serve_for`], which checks it here). If the asker goes away the task
+/// is cancelled.
+pub async fn serve(ch: Channel, host: &dyn TaskHost) -> Result<(), RemoteError> {
+    serve_inner(ch, None, host).await
+}
+
+/// Serve one task for `caller`: `auth` admits it first ([`Authorize::admit`]; a refusal is sent
+/// back as `Failed`), then the session comes from [`TaskHost::session_for`].
+pub async fn serve_for(ch: Channel, caller: Caller, auth: &dyn Authorize, host: &dyn TaskHost) -> Result<(), RemoteError> {
+    serve_inner(ch, Some((caller, auth)), host).await
+}
+
+async fn serve_inner(mut ch: Channel, check: Option<(Caller, &dyn Authorize)>, host: &dyn TaskHost) -> Result<(), RemoteError> {
     let request = match ch.recv::<ClientMsg>().await? {
         Some(ClientMsg::Run { request }) => request,
         _ => return Ok(()),
     };
     let id = request.id.clone();
     let (ask_tx, mut ask_rx) = mpsc::unbounded_channel();
-    let mut session = match host.session(&request, Arc::new(ForwardingApprover { asks: ask_tx })) {
+    let approver: Arc<dyn Approver> = Arc::new(ForwardingApprover { asks: ask_tx });
+    let made = match check {
+        None => host.session(&request, approver),
+        Some((caller, auth)) => auth.admit(&caller).and_then(|who| host.session_for(&who, &request, approver)),
+    };
+    let mut session = match made {
         Ok(s) => s,
         Err(error) => return ch.send(&ServerMsg::Failed { id, error }).await,
     };

@@ -8,7 +8,12 @@
 //!
 //! [`RosterAuth`] is the authorize hook for hosts: `weirdnet_sync::Roster::check_caller` with
 //! the peer and the certificate the caller presented. Hosts call it from
-//! [`InferHost::authorize`] and [`CatalogHost::authorize`].
+//! [`InferHost::authorize`] and [`CatalogHost::authorize`]. With
+//! [`require_roles`](RosterAuth::require_roles) it also needs one of the device roles the user
+//! granted the caller (the grants in the `weirdnet-sync` 0.7 roster, `Roster::roles_of`).
+//!
+//! [`Server::start_with`] also serves `/weirdnet-agent/task/1` ([`ServingExtras::tasks`]): each
+//! task is admitted by the given [`Authorize`] and built by [`TaskHost::session_for`].
 
 use std::sync::Arc;
 
@@ -21,22 +26,40 @@ pub use crate::net::{INFERENCE_APP, channel, decode_cert, encode_cert, stream_li
 pub use crate::remote::catalog::{CatalogFeed, CatalogHost};
 pub use crate::remote::infer::v2::{EmbedBackend, InferBackend, ModelAdapter, Output};
 pub use crate::remote::infer::{Admission, InferHost};
-use crate::remote::{Authorize, Caller, RemoteError, catalog, infer};
+pub use crate::remote::task::TaskHost;
+use crate::remote::{Admitted, Authorize, Caller, RemoteError, catalog, infer, task};
 
 /// The roster as it is now (the app keeps it current from `weirdnet-sync`).
 pub type RosterView = Arc<dyn Fn() -> Roster + Send + Sync>;
 
+/// The device roles a peer holds, `None` without a grant. With `weirdnet-sync` 0.7:
+/// `Arc::new(move |peer| identity.roster().roles_of(peer))`.
+pub type RoleView = Arc<dyn Fn(&str) -> Option<Vec<String>> + Send + Sync>;
+
 /// Admits only the user's linked devices (`Roster::check_caller`). Refusals carry the roster's
 /// reason (`unknown-device`, `revoked`, `wrong-user`, `needs-admission`).
+///
+/// With [`require_roles`](Self::require_roles) a linked caller also needs one of the roles
+/// (refused with `role` otherwise); without it any linked device is let in, as before.
 pub struct RosterAuth {
     profile: &'static Profile,
     user: PublicKey,
     roster: RosterView,
+    roles: Option<RoleView>,
+    any_of: Vec<String>,
 }
 
 impl RosterAuth {
     pub fn new(profile: &'static Profile, user: PublicKey, roster: RosterView) -> Self {
-        Self { profile, user, roster }
+        Self { profile, user, roster, roles: None, any_of: Vec::new() }
+    }
+
+    /// Needs one of `any_of` among the caller's granted roles. An empty `any_of` needs none but
+    /// still reports roles in [`admit`](Authorize::admit).
+    pub fn require_roles(mut self, any_of: &[&str], roles: RoleView) -> Self {
+        self.any_of = any_of.iter().map(|r| r.to_string()).collect();
+        self.roles = Some(roles);
+        self
     }
 
     pub fn check(&self, caller: &Caller) -> CallerCheck {
@@ -51,10 +74,18 @@ impl RosterAuth {
 
 impl Authorize for RosterAuth {
     fn authorize(&self, caller: &Caller) -> Result<(), RemoteError> {
-        match self.check(caller).reason() {
-            None => Ok(()),
-            Some(reason) => Err(RemoteError::refused(reason)),
+        self.admit(caller).map(|_| ())
+    }
+
+    fn admit(&self, caller: &Caller) -> Result<Admitted, RemoteError> {
+        if let Some(reason) = self.check(caller).reason() {
+            return Err(RemoteError::refused(reason));
         }
+        let roles = self.roles.as_ref().and_then(|view| view(&caller.peer));
+        if !self.any_of.is_empty() && !roles.as_ref().is_some_and(|have| have.iter().any(|r| self.any_of.contains(r))) {
+            return Err(RemoteError::refused("role"));
+        }
+        Ok(Admitted::new(caller.peer.clone(), roles))
     }
 }
 
@@ -74,6 +105,22 @@ pub struct Serving {
     pub announce: bool,
 }
 
+/// What a [`Server`] serves beyond [`Serving`] (a separate struct so `Serving` literals keep
+/// compiling in 0.4.x; it folds into `Serving` in 0.5).
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct ServingExtras {
+    /// task/1: whole agent tasks, admitted by the `Authorize` (usually a [`RosterAuth`]).
+    pub tasks: Option<(Arc<dyn TaskHost>, Arc<dyn Authorize>)>,
+}
+
+impl ServingExtras {
+    pub fn tasks(mut self, host: Arc<dyn TaskHost>, auth: Arc<dyn Authorize>) -> Self {
+        self.tasks = Some((host, auth));
+        self
+    }
+}
+
 fn accept_loop(mut incoming: Incoming, serve: impl Fn(crate::remote::Channel, Caller) + Send + 'static) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(stream) = incoming.next().await {
@@ -86,6 +133,12 @@ fn accept_loop(mut incoming: Incoming, serve: impl Fn(crate::remote::Channel, Ca
 impl Server {
     /// Starts serving on `node`. Call from a Tokio runtime.
     pub fn start<Q: Message, R: Message>(node: &Arc<Node<Q, R>>, serving: Serving) -> Result<Server, RemoteError> {
+        Self::start_with(node, serving, ServingExtras::default())
+    }
+
+    /// [`start`](Self::start) plus [`ServingExtras`]. When tasks are served, task/1 is added to
+    /// the [`INFERENCE_APP`] announcement.
+    pub fn start_with<Q: Message, R: Message>(node: &Arc<Node<Q, R>>, serving: Serving, extras: ServingExtras) -> Result<Server, RemoteError> {
         let net = |e: weirdnet_net::NetError| RemoteError::Failed { message: e.to_string() };
         let mut tasks = Vec::new();
         if let Some((host, admission)) = serving.infer {
@@ -111,9 +164,21 @@ impl Server {
                 });
             }));
         }
+        let serves_tasks = extras.tasks.is_some();
+        if let Some((host, auth)) = extras.tasks {
+            tasks.push(accept_loop(node.accept_streams(task::PROTOCOL, stream_limits()).map_err(net)?, move |ch, caller| {
+                let (h, a) = (host.clone(), auth.clone());
+                tokio::spawn(async move {
+                    let _ = task::serve_for(ch, caller, a.as_ref(), h.as_ref()).await;
+                });
+            }));
+        }
         let mut announced: Option<Box<dyn Fn() + Send + Sync>> = None;
         if serving.announce {
-            let protocols = vec![infer::PROTOCOL, infer::v2::PROTOCOL, catalog::PROTOCOL];
+            let mut protocols = vec![infer::PROTOCOL, infer::v2::PROTOCOL, catalog::PROTOCOL];
+            if serves_tasks {
+                protocols.push(task::PROTOCOL);
+            }
             let body = crate::remote::to_cbor(&protocols)?;
             node.serve_app(
                 INFERENCE_APP,
