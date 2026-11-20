@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-20
+
 ### Added
 
 - `LinkedNodes::with_retry_after` (default 30 s): how long an unreachable linked device is skipped before it is probed again. A connection from it, a network change or resuming clears it sooner.
