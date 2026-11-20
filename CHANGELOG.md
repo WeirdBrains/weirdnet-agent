@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-20
+
 ### Added
 
 - Device roles: `RosterAuth::require_roles(any_of, RoleView)` admits only linked devices holding one of the roles (refusal `role`); `Authorize::admit` (default method) and `Admitted { peer, roles }`.
