@@ -92,7 +92,7 @@ impl ModelBackend for Echo {
         "echo".into()
     }
     async fn complete(&self, m: &[Message], _t: &[ToolSpec], deltas: &DeltaSink, _c: &CancelToken) -> Result<ModelTurn, ModelError> {
-        let text = m.last().map(|m| m.content.clone()).unwrap_or_default();
+        let text = m.last().map(|m| m.text().into_owned()).unwrap_or_default();
         deltas.text(text.clone());
         Ok(ModelTurn { text, tool_calls: vec![] })
     }

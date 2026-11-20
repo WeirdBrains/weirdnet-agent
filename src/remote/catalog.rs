@@ -8,6 +8,11 @@
 //!
 //! One entry per model with its state, an estimated speed and how many replicas serve it, but
 //! no model-node addresses: apps only ever talk to inference nodes. Messages are CBOR.
+//!
+//! Each entry says which inputs beyond text it takes ([`CatalogModel::inputs`]: images, audio).
+//! Entries from nodes before 0.5 have none, so they count as text-only. [`Catalog::route`] picks
+//! a model for a request that carries images or audio, and the pool uses it so such a request
+//! never lands on a text-only model.
 
 use std::sync::Arc;
 
@@ -15,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::{Authorize, Caller, Channel, RemoteError, bytes};
+use crate::model::Modalities;
 
 /// Stream protocol id.
 pub const PROTOCOL: &str = "/weirdnet-agent/catalog/1";
@@ -67,6 +73,9 @@ pub struct CatalogModel {
     /// The model that answers while this one loads, if the pool policy names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standin: Option<String>,
+    /// Inputs it takes beyond text (images, audio). Empty: text only.
+    #[serde(default, skip_serializing_if = "Modalities::is_text")]
+    pub inputs: Modalities,
 }
 
 impl CatalogModel {
@@ -88,6 +97,17 @@ impl CatalogModel {
         self.context = Some(tokens);
         self
     }
+
+    /// The inputs it takes beyond text.
+    pub fn with_inputs(mut self, inputs: Modalities) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    /// A chat model that can read input needing `needed`.
+    pub fn accepts(&self, needed: Modalities) -> bool {
+        self.purpose == Purpose::Chat && self.inputs.covers(needed)
+    }
 }
 
 /// The models on offer. `rev` grows with every change.
@@ -105,6 +125,40 @@ impl Catalog {
 
     pub fn find(&self, id: &str) -> Option<&CatalogModel> {
         self.models.iter().find(|m| m.id == id)
+    }
+
+    /// The model for a request that needs `needed`: text requests keep `model` as is. Otherwise
+    /// a named model must take those inputs, and with none named the best chat model that does
+    /// is picked (warm, then busy, loading, loadable; then more replicas). A named model the
+    /// catalog does not list is left to the node. `BadRequest` when nothing here can read it.
+    pub fn route(&self, model: Option<&str>, needed: Modalities) -> Result<Option<String>, RemoteError> {
+        if needed.is_text() {
+            return Ok(model.map(str::to_string));
+        }
+        if let Some(id) = model {
+            return match self.find(id) {
+                Some(m) if !m.accepts(needed) => {
+                    let what = m.inputs.lacking(needed).unwrap_or("this input");
+                    Err(RemoteError::BadRequest { message: format!("model `{id}` does not take {what}; pick one whose catalog entry lists them") })
+                }
+                _ => Ok(Some(id.to_string())),
+            };
+        }
+        let rank = |s: ModelState| match s {
+            ModelState::Warm => 0,
+            ModelState::Busy => 1,
+            ModelState::Loading => 2,
+            _ => 3,
+        };
+        self.models
+            .iter()
+            .filter(|m| m.accepts(needed))
+            .min_by_key(|m| (rank(m.state), std::cmp::Reverse(m.replicas)))
+            .map(|m| Some(m.id.clone()))
+            .ok_or_else(|| {
+                let what = Modalities::TEXT.lacking(needed).unwrap_or("this input");
+                RemoteError::BadRequest { message: format!("no model in the pool takes {what}") }
+            })
     }
 }
 
@@ -280,6 +334,38 @@ mod tests {
                 assert_eq!(r.unwrap_err(), RemoteError::refused("unknown-device"));
             }
         }
+    }
+
+    #[test]
+    fn route_keeps_image_requests_off_text_only_models() {
+        let c = Catalog::new(
+            1,
+            vec![
+                CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm),
+                CatalogModel::new("gemma-cold", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::new(true, true)),
+                CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(Modalities::VISION),
+                CatalogModel::new("embed", Purpose::Embedding, ModelState::Warm).with_inputs(Modalities::new(true, true)),
+            ],
+        );
+        assert_eq!(c.route(None, Modalities::TEXT).unwrap(), None);
+        assert_eq!(c.route(Some("qwen"), Modalities::TEXT).unwrap().as_deref(), Some("qwen"));
+        assert_eq!(c.route(None, Modalities::VISION).unwrap().as_deref(), Some("gemma"), "warm first");
+        assert_eq!(c.route(None, Modalities::AUDIO).unwrap().as_deref(), Some("gemma-cold"));
+        let e = c.route(Some("qwen"), Modalities::VISION).unwrap_err();
+        assert!(matches!(&e, RemoteError::BadRequest { message } if message.contains("`qwen` does not take images")), "{e}");
+        assert_eq!(c.route(Some("not-listed"), Modalities::VISION).unwrap().as_deref(), Some("not-listed"));
+        let text_only = Catalog::new(1, vec![CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm)]);
+        let e = text_only.route(None, Modalities::new(true, true)).unwrap_err();
+        assert!(matches!(&e, RemoteError::BadRequest { message } if message == "no model in the pool takes images and audio"), "{e}");
+    }
+
+    #[test]
+    fn inputs_are_optional_on_the_wire() {
+        let plain = CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm);
+        let b = crate::remote::to_cbor(&plain).unwrap();
+        assert!(!b.windows(6).any(|w| w == b"inputs"), "text-only entries look as before");
+        let v = CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(Modalities::VISION);
+        assert_eq!(crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&v).unwrap()).unwrap(), v);
     }
 
     #[test]

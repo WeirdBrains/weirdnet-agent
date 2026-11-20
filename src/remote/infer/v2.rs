@@ -53,7 +53,7 @@ use tokio::sync::mpsc;
 use super::queue::{Admission, Turn};
 use super::{InferHost, model_error};
 use crate::cancel::CancelToken;
-use crate::model::{DeltaSink, Message, ModelBackend, Role, ToolCall};
+use crate::model::{DeltaSink, Message, Modalities, ModelBackend, Role, ToolCall};
 use crate::remote::{Caller, Channel, RemoteError, bytes, request_id};
 use crate::session::AgentEvent;
 use crate::tool::ToolSpec;
@@ -303,10 +303,10 @@ impl Request {
     /// request that ends any other way is returned unchanged.
     pub fn continuing(mut self) -> Self {
         if let Input::Messages(m) = &mut self.input
-            && m.last().is_some_and(|last| last.role == Role::Assistant && last.tool_calls.is_empty())
+            && m.last().is_some_and(|last| last.role == Role::Assistant && last.tool_calls.is_empty() && last.content.as_text().is_some())
             && let Some(last) = m.pop()
         {
-            self.assistant_prefix = Some(Prefix::new(last.content, ""));
+            self.assistant_prefix = Some(Prefix::new(last.content.into_text(), ""));
         }
         self
     }
@@ -328,6 +328,12 @@ impl Request {
             Input::Messages(m) => Some(m),
             _ => None,
         }
+    }
+
+    /// What a model needs to read the inline messages: [`Modalities::TEXT`] unless some carry
+    /// images or audio. Context references and raw prompts are text.
+    pub fn needs(&self) -> Modalities {
+        self.inline_messages().map(crate::model::needs).unwrap_or(Modalities::TEXT)
     }
 
     /// The raw prompt, if the input is one.

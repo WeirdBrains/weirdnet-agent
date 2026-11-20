@@ -209,8 +209,9 @@ impl AgentSession {
         self.signed_in_next = profile;
     }
 
-    /// Runs one task to completion, cancellation or a budget limit.
-    pub async fn run(&mut self, input: impl Into<String>, events: Option<UnboundedSender<AgentEvent>>, cancel: CancelToken) -> Outcome {
+    /// Runs one task to completion, cancellation or a budget limit. `input` is text or parts
+    /// (see [`Content`](crate::Content)).
+    pub async fn run(&mut self, input: impl Into<crate::Content>, events: Option<UnboundedSender<AgentEvent>>, cancel: CancelToken) -> Outcome {
         self.task_seq += 1;
         let task_id = format!("{}-{}-{}", self.config.identity.id, now_unix_ms(), self.task_seq);
         let mut task = TaskRun {
@@ -538,8 +539,8 @@ mod tests {
         assert_eq!(out.stop, StopReason::Completed);
         assert!(approver.asked().is_empty());
         let tool_msg = &s.messages()[3];
-        assert!(tool_msg.content.starts_with("<untrusted_tool_result tool=\"page.text\">"));
-        assert!(tool_msg.content.ends_with("[trace steps: 2]"));
+        assert!(tool_msg.text().starts_with("<untrusted_tool_result tool=\"page.text\">"));
+        assert!(tool_msg.text().ends_with("[trace steps: 2]"));
         assert!(matches!(out.trace.steps[1].kind, StepKind::Tool { ref tool, .. } if tool == "page.text"));
         assert_eq!(out.trace.steps[1].node.as_deref(), Some("node-a"));
     }
@@ -557,7 +558,7 @@ mod tests {
         assert_eq!(out.stop, StopReason::Completed);
         assert_eq!(approver.asked().len(), 1);
         assert_eq!(approver.asked()[0].request.site.as_deref(), Some("tokio.rs"));
-        assert!(s.messages().iter().any(|m| m.content.contains("at \"https://docs.rs\"")));
+        assert!(s.messages().iter().any(|m| m.text().contains("at \"https://docs.rs\"")));
     }
 
     #[tokio::test]
@@ -587,8 +588,8 @@ mod tests {
         let out = s.run("buy", Some(tx), CancelToken::new()).await;
         assert_eq!(*ran.lock().unwrap(), 0);
         assert_eq!(approver.asked().len(), 1, "Off site is blocked without asking");
-        assert!(s.messages()[3].content.contains("declined"));
-        assert!(s.messages()[4].content.contains("bank.example is set to Off"));
+        assert!(s.messages()[3].text().contains("declined"));
+        assert!(s.messages()[4].text().contains("bank.example is set to Off"));
         let blocked = drain(&mut rx).into_iter().filter(|e| matches!(e, AgentEvent::Blocked { .. })).count();
         assert_eq!(blocked, 2);
         assert!(out.trace.steps.iter().any(|s| matches!(&s.kind, StepKind::Skipped { url: Some(u), .. } if u.contains("bank.example"))));
@@ -631,7 +632,7 @@ mod tests {
         let mut s = session(model, registry(vec![Arc::new(search_tool())]).await, policy, Arc::new(ScriptedApprover::default()));
         let out = s.run("research", None, CancelToken::new()).await;
         assert_eq!(out.usage.searches, 3);
-        assert!(s.messages().iter().find(|m| m.tool_call_id.as_deref() == Some("4")).unwrap().content.contains("search budget used"));
+        assert!(s.messages().iter().find(|m| m.tool_call_id.as_deref() == Some("4")).unwrap().text().contains("search budget used"));
         let notice = out.trace.steps.iter().find_map(|s| if let StepKind::Notice { text } = &s.kind { Some(text.clone()) } else { None }).unwrap();
         assert!(notice.contains("duckduckgo"));
         assert_eq!(out.trace.summary().searches, 3);
@@ -647,7 +648,7 @@ mod tests {
         let mut s = session(model, registry(vec![Arc::new(fetch_tool())]).await, Policy::new().shared(), approver);
         let out = s.run("research", None, CancelToken::new()).await;
         let tool_msg = s.messages().iter().find(|m| m.tool_call_id.is_some()).unwrap();
-        assert!(tool_msg.content.len() < 17_000, "page text kept to the token budget");
+        assert!(tool_msg.text().len() < 17_000, "page text kept to the token budget");
         let fetch_step = out.trace.steps.iter().find(|s| matches!(s.kind, StepKind::Fetch { .. })).unwrap().id;
         let good = Citation { n: 1, target: CitationTarget::Url { url: "https://tokio.rs/a".into(), quote: None }, steps: vec![fetch_step] };
         let bad =
@@ -705,7 +706,7 @@ mod tests {
         let mut s = session(model, registry(vec![Arc::new(SlowTool)]).await, Policy::new().shared(), Arc::new(ScriptedApprover::default()));
         let out = s.run("x", None, CancelToken::new()).await;
         assert_eq!(out.stop, StopReason::Completed);
-        assert!(s.messages()[3].content.contains("timed out"));
+        assert!(s.messages()[3].text().contains("timed out"));
         assert!(matches!(out.trace.steps[1].kind, StepKind::Tool { is_error: true, .. }));
     }
 
@@ -806,7 +807,7 @@ mod tests {
         // 10 s + 10 s, then the third call gets the 5 s left and times out.
         assert_eq!(out.stop, StopReason::Budget { exceeded: BudgetExceeded::Time { limit_ms: 25_000 } });
         assert_eq!(out.usage.elapsed_ms, 25_000);
-        assert!(s.messages().iter().any(|m| m.content.contains("timed out")));
+        assert!(s.messages().iter().any(|m| m.text().contains("timed out")));
     }
 
     /// Approves every card for the task and answers "+5 pages" from a queue (then no).
@@ -868,7 +869,7 @@ mod tests {
         let mut s = AgentSession::new(cfg, Arc::new(ScriptedModel::new(fetches(2))), tools, Policy::new().shared(), approver);
         let out = s.run("x", None, CancelToken::new()).await;
         assert_eq!((out.usage.pages, out.usage.page_limit), (1, 1));
-        assert!(s.messages().iter().any(|m| m.content.contains("not run: page budget used (1 pages)")));
+        assert!(s.messages().iter().any(|m| m.text().contains("not run: page budget used (1 pages)")));
     }
 
     #[tokio::test]
@@ -878,7 +879,7 @@ mod tests {
         s.config.budget.max_steps = 2;
         let out = s.run("x", None, CancelToken::new()).await;
         assert_eq!(out.stop, StopReason::Budget { exceeded: BudgetExceeded::Steps { limit: 2 } });
-        assert!(s.messages()[3].content.contains("unknown tool missing"));
+        assert!(s.messages()[3].text().contains("unknown tool missing"));
     }
 
     #[tokio::test]

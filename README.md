@@ -28,6 +28,15 @@ records what happened.
   with its agent, node and session (logged out or signed in). `validate_citations` rejects a cited
   URL that none of its steps fetched; `retain_valid` drops such citations before display.
 - Everything that is stored or synced implements serde.
+- `Message::content` is a `Content`: text, or OpenAI-style parts (`ContentPart::text`,
+  `ContentPart::image` with a `data:image/...` URL, `ContentPart::audio`). Text still goes on the
+  wire as a plain string, so text-only messages reach older peers as before; parts need 0.5 on
+  both ends. `Message::needs()` / `Request::needs()` give the `Modalities` (vision, audio) a model
+  must accept, and `Message::text()` the text alone.
+
+  ```rust
+  let ask = Message::user(vec![ContentPart::text("What is in this photo?"), ContentPart::image(data_url)]);
+  ```
 
 - `remote`: protocols between one user's own nodes over an app-supplied `Dialer` / `Channel`
   (`codec` frames messages on byte streams, `MemoryDialer` for tests). The serving side gets a
@@ -41,7 +50,12 @@ records what happened.
     text; continues a stopped answer from a caller's `assistant_prefix` (`Request::continuing`)
     on nodes that resume; embeddings, background jobs and catalog subscribe with failover. `RemoteModel` is a
     `ModelBackend` over it, with a local fallback before any token has streamed.
-  - `remote::catalog` (`/weirdnet-agent/catalog/1`): which models the nodes have and their state.
+  - `remote::catalog` (`/weirdnet-agent/catalog/1`): which models the nodes have, their state and
+    the inputs beyond text they take (`CatalogModel::inputs`; entries without it are text-only).
+    `Catalog::route` picks the model for a request with images or audio. The pool uses it, so such
+    a request never lands on a text-only model: a named model that can't read it, or a pool with
+    no model that can, is a `BadRequest` before any node runs it. Requests with parts skip infer/1
+    nodes. Frames may be up to 32 MiB (8 MiB before 0.5).
   - `remote::task` runs a whole task on another node (Node companions): events stream back as
     `AgentEvent`s, approval cards are answered on the asking device, cancel stops the task there.
 
@@ -60,6 +74,11 @@ Features:
   `TaskHost::session_for`, so hosts can scope tools per device or role; the announcement then
   lists task/1.
 - `testing`: `ScriptedModel`, `ScriptedApprover` and `FnTool` for downstream tests.
+
+Migrating from 0.4: `Message::content` is a `Content`, not a `String`. Constructors take
+`impl Into<Content>`, so `Message::user("hi")` is unchanged; read text with `m.text()` or
+`m.content.text()`, and build parts with `ContentPart`. `AgentSession::run` takes
+`impl Into<Content>`.
 
 Migrating from 0.3: implement `InferHost::authorize` (for Weirdnet, `serve::RosterAuth`), add the
 `caller` argument to `InferHost::open` and `infer::serve`, and add wildcard arms when matching

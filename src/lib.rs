@@ -11,7 +11,8 @@
 //! - [`policy`]: tiers, per-companion per-site grants, task approvals and standing allows.
 //! - [`budget`]: searches, pages, concurrency and time limits.
 //! - [`trace`]: steps, citations and the cited-step check.
-//! - [`model`]: the model backend trait and chat messages.
+//! - [`model`]: the model backend trait and chat messages, whose [`Content`] is text or parts
+//!   (text, images, audio) with the [`Modalities`] a model needs to read them.
 //! - [`remote`]: protocols between one user's nodes over an app-supplied channel: inference
 //!   (`infer/2` with priorities, queueing, reasoning, tool calls, embeddings and resume; `infer/1`
 //!   kept for 0.3 nodes), the model catalog, remote tasks (Node companions), and the
@@ -45,7 +46,7 @@ pub mod trace;
 pub use budget::{Budget, BudgetExceeded, BudgetTracker, BudgetUsage, ToolTimer};
 pub use cancel::CancelToken;
 pub use identity::{AgentId, AgentIdentity, AgentKind};
-pub use model::{DeltaSink, Message, ModelBackend, ModelError, ModelTurn, Role, ToolCall};
+pub use model::{Content, ContentPart, DeltaSink, ImageUrl, InputAudio, Message, Modalities, ModelBackend, ModelError, ModelTurn, Role, ToolCall};
 pub use policy::{
     ActionRequest, AllowRule, ApprovalPrompt, CompanionScope, Decision, DenyReason, Policy, PolicyError, Scope, SharedPolicy, SiteLevel, SkipNotice,
     StandingAllow, TaskApprovals, Tier, site_of,

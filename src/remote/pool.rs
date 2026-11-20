@@ -20,6 +20,13 @@
 //!   new), and only nodes whose `Accepted` says `resume: true` take it. Failover keeps the
 //!   prefix whether or not resume is on; infer/1 nodes are skipped.
 //!
+//! - **Images and audio:** a request whose messages carry image or audio parts
+//!   ([`Request::needs`]) is routed by the catalog first ([`Catalog::route`]): a named model must
+//!   list those inputs, and with none named the pool picks one that does. When the catalog says
+//!   no model takes them, the request fails with `BadRequest` before any node runs it. With no
+//!   catalog to ask, the nodes decide (model nodes refuse inputs their model can't read). Such
+//!   requests never go to infer/1 nodes, which predate content parts.
+//!
 //! The pool also queries and subscribes to the [`catalog`], sends embeddings,
 //! and runs [`Job`]s in the background. It has no networking of its own: a [`Dialer`] opens
 //! channels and a [`NodeSource`] says which nodes to try, in order. The `pool` cargo feature
@@ -391,6 +398,22 @@ impl Pool {
         if request.cert.is_none() {
             request.cert.clone_from(&self.opts.cert);
         }
+        let needed = request.needs();
+        if !needed.is_text() {
+            let refuse = |error| Err(Interrupted { error, partial: Box::default(), tried: Vec::new() });
+            if let Some(Err(message)) = request.inline_messages().unwrap_or_default().iter().map(|m| m.content.check()).find(Result::is_err) {
+                return refuse(RemoteError::BadRequest { message });
+            }
+            match self.catalog().await {
+                Ok(catalog) => match catalog.route(request.model.as_deref(), needed) {
+                    Ok(model) => request.model = model,
+                    Err(e) => return refuse(e),
+                },
+                Err(e) if e.is_request_error() => return refuse(e),
+                // No catalog to ask: the nodes decide.
+                Err(_) => {}
+            }
+        }
         let mut answer = Answer::default();
         // Continue: the answer starts from the caller's prefix, so the node's frames (which
         // start at its length) line up, and failover keeps it.
@@ -416,7 +439,7 @@ impl Pool {
             first = false;
             let pending = resuming.then(|| chars(&answer.text));
             let outcome = match self.attempt(&node, &next, &mut answer, pending, &mut resumes, events, cancel).await {
-                Err(Fail::Unsupported(e)) if self.opts.infer_v1_fallback && next.assistant_prefix.is_none() => {
+                Err(Fail::Unsupported(e)) if self.opts.infer_v1_fallback && next.assistant_prefix.is_none() && needed.is_text() => {
                     match self.attempt_v1(&node, &next, &mut answer, events, cancel).await {
                         Err(Fail::Unsupported(_)) => Err(Fail::Unsupported(e)),
                         other => other,

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Image and audio content parts: `Content` (text or `ContentPart`s: text, `image_url` with a data URL, `input_audio`), carried by infer/2 and the pool.
+- `Modalities` (vision, audio), `Message::needs`, `Request::needs`, `Content::check` (data URLs only).
+- `CatalogModel::inputs` / `with_inputs` / `accepts` and `Catalog::route`: the pool routes image and audio requests only to models that take them, and refuses with `BadRequest` when none does.
+
+### Changed
+
+- Breaking: `Message::content` is a `Content`; plain text keeps its wire form. `AgentSession::run` takes `impl Into<Content>`.
+- Frames may be up to 32 MiB (was 8 MiB).
+- Requests with images or audio skip infer/1 nodes.
+
 ## [0.4.5] - 2026-11-20
 
 ### Changed

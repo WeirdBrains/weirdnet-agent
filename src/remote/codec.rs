@@ -2,8 +2,9 @@
 
 use super::RemoteError;
 
-/// Largest message accepted (8 MiB): a long conversation fits, a runaway one does not.
-pub const MAX_FRAME: usize = 8 << 20;
+/// Largest message accepted (32 MiB): a long conversation with a few full-HD images fits, a
+/// runaway one does not. Peers before 0.5 accept 8 MiB.
+pub const MAX_FRAME: usize = 32 << 20;
 
 /// One framed message, ready to write.
 pub fn encode_frame(message: &[u8]) -> Result<Vec<u8>, RemoteError> {

@@ -14,7 +14,8 @@ use super::v2::{
 };
 use super::{Admission, ClientMsg, InferHost, InferRequest, PROTOCOL as V1, RemoteModel, Route, serve as serve_v1};
 use crate::cancel::CancelToken;
-use crate::model::{DeltaSink, Message, ModelBackend, ModelError, ModelTurn, ToolCall};
+use crate::model::{ContentPart, DeltaSink, Message, Modalities, ModelBackend, ModelError, ModelTurn, ToolCall};
+use crate::remote::catalog::{self, CatalogFeed, CatalogModel, ModelState, Purpose};
 use crate::remote::pool::{NoEvents, Pool, PoolEvent, PoolOptions, Stall};
 use crate::remote::{Caller, Channel, RemoteError};
 use crate::remote::{FrameTx, MemoryDialer, from_cbor, memory_pair, to_cbor};
@@ -819,4 +820,77 @@ fn continuing_moves_a_trailing_assistant_message_into_the_prefix() {
     assert_eq!(with_call.clone().continuing(), with_call);
     let ends_with_user = Request::messages(vec![Message::user("q")]);
     assert_eq!(ends_with_user.clone().continuing(), ends_with_user);
+}
+
+const PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+fn image_request() -> Request {
+    Request::messages(vec![Message::user(vec![ContentPart::text("what is this?"), ContentPart::image(PNG)])])
+}
+
+/// An inference node serving infer/2 and a catalog/1 with a text model and a vision model.
+fn serving_with_catalog(dialer: &MemoryDialer, node: &str, backend: Arc<dyn InferBackend>) {
+    let host = Arc::new(Host { backend });
+    let feed = CatalogFeed::new(Arc::new(|_: &Caller| Ok(())));
+    feed.publish(vec![
+        CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm),
+        CatalogModel::new("gemma", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::new(true, true)),
+    ]);
+    let admission = Admission::new(1);
+    dialer.route(node, move |ch, protocol| {
+        let (host, admission, feed) = (host.clone(), admission.clone(), feed.clone());
+        tokio::spawn(async move {
+            if protocol == catalog::PROTOCOL {
+                let _ = catalog::serve(ch, Caller::new("phone"), &feed).await;
+            } else if protocol == v2::PROTOCOL {
+                let _ = v2::serve(ch, Caller::new("phone"), host.as_ref(), &admission).await;
+            }
+        });
+    });
+}
+
+#[tokio::test]
+async fn image_requests_go_to_a_model_that_takes_images() {
+    let dialer = MemoryDialer::new();
+    let script = Script::new("gemma@node-b", false, vec![Step::Text("a cat")]);
+    serving_with_catalog(&dialer, "inference", script.clone());
+    let answer = pool(dialer, &["inference"]).infer(image_request(), &NoEvents, &CancelToken::new()).await.unwrap();
+    assert_eq!(answer.text, "a cat");
+    let seen = script.seen();
+    assert_eq!(seen[0].model.as_deref(), Some("gemma"), "picked from the catalog, not the text-only default");
+    let parts = seen[0].inline_messages().unwrap()[0].content.parts();
+    assert_eq!(parts, vec![ContentPart::text("what is this?"), ContentPart::image(PNG)], "parts arrive unchanged");
+}
+
+#[tokio::test]
+async fn image_requests_never_reach_a_text_only_model() {
+    let dialer = MemoryDialer::new();
+    let script = Script::new("qwen@node-b", false, vec![Step::Text("no")]);
+    serving_with_catalog(&dialer, "inference", script.clone());
+    let p = pool(dialer, &["inference"]);
+    let e = p.infer(image_request().with_model("qwen"), &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(matches!(&e.error, RemoteError::BadRequest { message } if message.contains("`qwen` does not take images")), "{:?}", e.error);
+    let remote = Request::messages(vec![Message::user(vec![ContentPart::image("https://example.com/cat.png")])]);
+    let e = p.infer(remote, &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(matches!(&e.error, RemoteError::BadRequest { message } if message.contains("data:image")), "{:?}", e.error);
+    assert!(script.seen().is_empty());
+    // Text still goes to whatever the node picks.
+    p.infer(Request::messages(vec![Message::user("hi")]), &NoEvents, &CancelToken::new()).await.unwrap();
+    assert_eq!(script.seen()[0].model, None);
+}
+
+#[tokio::test]
+async fn without_a_catalog_the_node_decides_and_infer1_is_skipped() {
+    let dialer = MemoryDialer::new();
+    let script = Script::new("gemma@node-b", false, vec![Step::Text("a cat")]);
+    serving(&dialer, "inference", script.clone(), Admission::new(1), None, "phone");
+    let v1_hits = Arc::new(AtomicUsize::new(0));
+    let hits = v1_hits.clone();
+    dialer.route_only("old", &[V1], move |_ch, _| {
+        hits.fetch_add(1, Ordering::SeqCst);
+    });
+    let answer = pool(dialer, &["old", "inference"]).infer(image_request(), &NoEvents, &CancelToken::new()).await.unwrap();
+    assert_eq!(answer.text, "a cat");
+    assert_eq!(script.seen()[0].model, None);
+    assert_eq!(v1_hits.load(Ordering::SeqCst), 0, "infer/1 nodes predate content parts");
 }
