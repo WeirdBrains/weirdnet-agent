@@ -9,6 +9,7 @@
 ### Fixed
 
 - `Pool::infer` no longer fails with missing characters when a request carries an `assistant_prefix` on its first attempt.
+- `remote::task`: an approval card no longer overtakes the events sent before it (the asker could see the card before `TaskStarted`).
 
 ## [0.4.1] - 2026-11-19
 

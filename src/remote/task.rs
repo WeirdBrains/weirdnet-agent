@@ -150,8 +150,10 @@ pub async fn serve(mut ch: Channel, host: &dyn TaskHost) -> Result<(), RemoteErr
     let outcome = {
         let mut run = pin!(session.run(request.input.clone(), Some(ev_tx), cancel.clone()));
         loop {
+            // Biased, events first: an approval card must not overtake the events the session
+            // sent before it (the asker would see the card before `TaskStarted`).
             tokio::select! {
-                o = &mut run => break o,
+                biased;
                 Some(ev) = ev_rx.recv() => {
                     if let Some(msg) = wire_event(ev)
                         && !send_failed
@@ -185,6 +187,7 @@ pub async fn serve(mut ch: Channel, host: &dyn TaskHost) -> Result<(), RemoteErr
                         cancel.cancel();
                     }
                 },
+                o = &mut run => break o,
             }
         }
     };
