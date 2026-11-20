@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 
 futures = { version = "0.3", optional = true }
 weirdnet-net = { version = "0.8.0", optional = true }
-weirdnet-sync = { version = "0.5.0", optional = true }
+weirdnet-sync = { version = "0.5.2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread", "test-util"] }
