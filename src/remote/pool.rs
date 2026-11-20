@@ -14,6 +14,11 @@
 //!   placed by offset, so nothing is shown twice. At most [`PoolOptions::max_resumes`] resumes
 //!   per answer; each is recorded in the answer's [`Meta::resumes`]. With resume off, or once
 //!   nothing more can take it, the partial answer comes back in [`Interrupted`].
+//! - **Continue:** a request that already carries an `assistant_prefix` (the user asked to
+//!   continue a stopped or cut-off answer) continues that text: the answer starts from the
+//!   prefix ([`Answer::prefix`]; `text` and `reasoning` include it, events carry only what is
+//!   new), and only nodes whose `Accepted` says `resume: true` take it. Failover keeps the
+//!   prefix whether or not resume is on; infer/1 nodes are skipped.
 //!
 //! The pool also queries and subscribes to the [`catalog`], sends embeddings,
 //! and runs [`Job`]s in the background. It has no networking of its own: a [`Dialer`] opens
@@ -246,6 +251,9 @@ pub struct Answer {
     pub node: String,
     /// The model it reported.
     pub model: String,
+    /// The `assistant_prefix` the request asked to continue (empty if none). `text` and
+    /// `reasoning` start with it; [`Answer::continuation`] is the text after it.
+    pub prefix: Prefix,
 }
 
 impl Answer {
@@ -254,8 +262,20 @@ impl Answer {
         ModelTurn { text: self.text.clone(), tool_calls: self.tool_calls.clone() }
     }
 
+    /// The text generated after [`Answer::prefix`] (all of it when there is none).
+    pub fn continuation(&self) -> &str {
+        let at = self.text.char_indices().nth(self.prefix.len as usize).map_or(self.text.len(), |(i, _)| i);
+        &self.text[at..]
+    }
+
+    /// Something was generated beyond the prefix.
     fn has_output(&self) -> bool {
-        !self.text.is_empty() || !self.reasoning.is_empty() || !self.tool_calls.is_empty()
+        chars(&self.text) > self.prefix.len || chars(&self.reasoning) > self.prefix.reasoning_len || !self.tool_calls.is_empty()
+    }
+
+    /// The text and reasoning so far, as the prefix of a next attempt.
+    fn shown(&self) -> Option<Prefix> {
+        (!self.text.is_empty() || !self.reasoning.is_empty()).then(|| Prefix::new(self.text.clone(), self.reasoning.clone()))
     }
 }
 
@@ -372,6 +392,13 @@ impl Pool {
             request.cert.clone_from(&self.opts.cert);
         }
         let mut answer = Answer::default();
+        // Continue: the answer starts from the caller's prefix, so the node's frames (which
+        // start at its length) line up, and failover keeps it.
+        if let Some(p) = request.assistant_prefix.clone().filter(|p| !p.is_empty() && p.is_consistent()) {
+            answer.text.clone_from(&p.text);
+            answer.reasoning.clone_from(&p.reasoning);
+            answer.prefix = p;
+        }
         let mut tried: Vec<(String, RemoteError)> = Vec::new();
         let mut resumes: Vec<Resume> = Vec::new();
         let mut next = request;
@@ -384,12 +411,12 @@ impl Pool {
             let resuming = answer.has_output();
             if !first {
                 next = next.next_attempt();
-                next.assistant_prefix = resuming.then(|| Prefix::new(answer.text.clone(), answer.reasoning.clone()));
+                next.assistant_prefix = answer.shown();
             }
             first = false;
             let pending = resuming.then(|| chars(&answer.text));
             let outcome = match self.attempt(&node, &next, &mut answer, pending, &mut resumes, events, cancel).await {
-                Err(Fail::Unsupported(e)) if self.opts.infer_v1_fallback && !resuming => {
+                Err(Fail::Unsupported(e)) if self.opts.infer_v1_fallback && next.assistant_prefix.is_none() => {
                     match self.attempt_v1(&node, &next, &mut answer, events, cancel).await {
                         Err(Fail::Unsupported(_)) => Err(Fail::Unsupported(e)),
                         other => other,
@@ -409,7 +436,9 @@ impl Pool {
                     return Ok(answer);
                 }
                 Err(Fail::Cancelled) => return Err(interrupted(RemoteError::Cancelled, answer, tried)),
-                Err(Fail::NoResume) => tried.push((node, RemoteError::Unsupported { message: "the node cannot resume an answer".into() })),
+                Err(Fail::NoResume) => {
+                    tried.push((node, RemoteError::Unsupported { message: "the node cannot resume or continue an answer".into() }))
+                }
                 Err(Fail::Unsupported(e)) => tried.push((node, e)),
                 Err(Fail::Error(e)) if e.is_request_error() => {
                     tried.push((node, e.clone()));

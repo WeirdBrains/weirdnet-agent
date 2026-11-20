@@ -38,7 +38,8 @@ records what happened.
     answer can resume on another node. `infer/1` (JSON) is still served for 0.3 callers.
   - `remote::pool::Pool`: tries nodes in order, cancels a stalled stream (max(15 s, 3× the token
     gap), under the transport's 30 s resume window) and resumes it elsewhere without repeating
-    text; embeddings, background jobs and catalog subscribe with failover. `RemoteModel` is a
+    text; continues a stopped answer from a caller's `assistant_prefix` (`Request::continuing`)
+    on nodes that resume; embeddings, background jobs and catalog subscribe with failover. `RemoteModel` is a
     `ModelBackend` over it, with a local fallback before any token has streamed.
   - `remote::catalog` (`/weirdnet-agent/catalog/1`): which models the nodes have and their state.
   - `remote::task` runs a whole task on another node (Node companions): events stream back as

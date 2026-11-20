@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Continue an answer: `Pool::infer` accepts a request that already carries an `assistant_prefix` (assistant prefill). The answer starts from it (`Answer::prefix`, `Answer::continuation`), events carry only new text, failover keeps it, and only nodes that say `resume: true` take it; others are skipped as `Unsupported`. `Request::continuing` turns a trailing assistant message into that prefix. No wire change.
+
+### Fixed
+
+- `Pool::infer` no longer fails with missing characters when a request carries an `assistant_prefix` on its first attempt.
+
 ## [0.4.1] - 2026-11-19
 
 ### Added

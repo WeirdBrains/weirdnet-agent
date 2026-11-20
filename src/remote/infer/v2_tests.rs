@@ -763,3 +763,60 @@ fn request_errors_and_node_answers() {
     assert!(!RemoteError::Busy.is_request_error() && RemoteError::Busy.is_node_answer());
     assert!(!RemoteError::Timeout.is_node_answer() && !RemoteError::Closed.is_node_answer());
 }
+
+#[tokio::test]
+async fn continue_starts_from_the_callers_prefix_and_skips_nodes_that_cannot() {
+    let dialer = MemoryDialer::new();
+    let old = Script::new("old", false, vec![Step::Text("Hello from scratch")]);
+    serving(&dialer, "old", old.clone(), Admission::new(1), None, "phone");
+    let b = Script::new("b", true, vec![Step::Text(" world")]);
+    serving(&dialer, "b", b.clone(), Admission::new(1), None, "phone");
+    let (tx, mut rx) = events();
+    let request = Request::messages(vec![Message::user("q")]).with_prefix(Prefix::new("Hello", "hm"));
+    // Resume off: a Continue is the request itself, not a resume, so it still moves on.
+    let p = pool(dialer.clone(), &["old", "b"]);
+    let p = p.clone().with_options(p.options().clone().with_resume(false));
+    let answer = p.infer(request, &tx, &CancelToken::new()).await.unwrap();
+    assert_eq!((answer.text.as_str(), answer.reasoning.as_str(), answer.node.as_str()), ("Hello world", "hm", "b"));
+    assert_eq!(answer.continuation(), " world");
+    assert_eq!(answer.prefix, Prefix::new("Hello", "hm"));
+    assert!(answer.meta.resumes.is_empty(), "a continue is not a resume");
+    assert_eq!(b.seen()[0].assistant_prefix, Some(Prefix::new("Hello", "hm")));
+    assert_eq!(shown(&drain(&mut rx)), " world", "events carry only the new text");
+
+    // Nothing that can continue: nothing streamed, the prefix comes back as it was.
+    let err =
+        pool(dialer, &["old"]).infer(Request::messages(vec![]).with_prefix(Prefix::new("Hi", "")), &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(!err.streamed());
+    assert_eq!(err.partial.text, "Hi");
+    assert!(matches!(err.error, RemoteError::Unsupported { .. }), "{:?}", err.error);
+}
+
+#[tokio::test]
+async fn a_continued_answer_cut_off_mid_way_resumes_with_the_whole_prefix() {
+    let dialer = MemoryDialer::new();
+    let a = Script::new("a", true, vec![Step::Text(" upon"), Step::Sleep(50), Step::Text("never"), Step::Hang]);
+    let b = Script::new("b", true, vec![Step::Text(" a time")]);
+    // Accepted, Delta, then the channel goes.
+    serving(&dialer, "a", a, Admission::new(1), Some(2), "phone");
+    serving(&dialer, "b", b.clone(), Admission::new(1), None, "phone");
+    let request = Request::prompt("Tell me a story.").with_prefix(Prefix::new("Once", ""));
+    let answer = pool(dialer, &["a", "b"]).infer(request, &NoEvents, &CancelToken::new()).await.unwrap();
+    assert_eq!(answer.text, "Once upon a time");
+    assert_eq!(answer.continuation(), " upon a time");
+    assert_eq!(answer.meta.resumes, [Resume::new(9, "b")]);
+    assert_eq!(b.seen()[0].assistant_prefix, Some(Prefix::new("Once upon", "")));
+}
+
+#[test]
+fn continuing_moves_a_trailing_assistant_message_into_the_prefix() {
+    let r = Request::messages(vec![Message::user("q"), Message::assistant("Once upon", vec![])]).continuing();
+    assert_eq!(r.inline_messages().unwrap(), [Message::user("q")]);
+    assert_eq!(r.assistant_prefix, Some(Prefix::new("Once upon", "")));
+
+    let call = ToolCall { id: "c".into(), name: "t".into(), arguments: json!({}) };
+    let with_call = Request::messages(vec![Message::user("q"), Message::assistant("", vec![call])]);
+    assert_eq!(with_call.clone().continuing(), with_call);
+    let ends_with_user = Request::messages(vec![Message::user("q")]);
+    assert_eq!(ends_with_user.clone().continuing(), ends_with_user);
+}

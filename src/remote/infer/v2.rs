@@ -26,6 +26,9 @@
 //!   backend honours it ([`InferBackend::resumes`]) says `resume: true` and streams only what
 //!   comes after it, starting at offset = prefix length. Others say `resume: false` and start
 //!   over at 0; askers that need a resume move on.
+//! - **Continue:** the same prefix continues an answer the user stopped or that was cut off
+//!   (assistant prefill; [`Request::continuing`] makes one from a trailing assistant message).
+//!   The wire format is unchanged, so any 0.4 server whose backend resumes can serve it.
 //! - **Tool calls** are sent whole, never half-built.
 //! - **Raw prompts** ([`Input::Prompt`]) are for completions: the model continues the text, with
 //!   no chat template and no tools.
@@ -50,7 +53,7 @@ use tokio::sync::mpsc;
 use super::queue::{Admission, Turn};
 use super::{InferHost, model_error};
 use crate::cancel::CancelToken;
-use crate::model::{DeltaSink, Message, ModelBackend, ToolCall};
+use crate::model::{DeltaSink, Message, ModelBackend, Role, ToolCall};
 use crate::remote::{Caller, Channel, RemoteError, bytes, request_id};
 use crate::session::AgentEvent;
 use crate::tool::ToolSpec;
@@ -291,6 +294,20 @@ impl Request {
 
     pub fn with_prefix(mut self, prefix: Prefix) -> Self {
         self.assistant_prefix = Some(prefix);
+        self
+    }
+
+    /// Continue the last assistant message: a trailing assistant message with no tool calls
+    /// moves into `assistant_prefix` (prefill), so the model carries on from its text. Only
+    /// nodes that say `resume: true` take such a request; others answer `Unsupported`. A
+    /// request that ends any other way is returned unchanged.
+    pub fn continuing(mut self) -> Self {
+        if let Input::Messages(m) = &mut self.input
+            && m.last().is_some_and(|last| last.role == Role::Assistant && last.tool_calls.is_empty())
+            && let Some(last) = m.pop()
+        {
+            self.assistant_prefix = Some(Prefix::new(last.content, ""));
+        }
         self
     }
 
