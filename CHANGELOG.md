@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-20
+
 ### Added
 
 - Image and audio content parts: `Content` (text or `ContentPart`s: text, `image_url` with a data URL, `input_audio`), carried by infer/2 and the pool.
