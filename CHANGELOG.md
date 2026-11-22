@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-22
+
 ### Added
 
 - `CacheMode` (`use`, `bypass`, `refresh`) and `Request::cache`: skip or refresh a node's answer cache for one request, without raw mode. Left off the wire when `use`.
