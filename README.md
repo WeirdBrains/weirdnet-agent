@@ -42,7 +42,8 @@ records what happened.
   (`codec` frames messages on byte streams, `MemoryDialer` for tests). The serving side gets a
   `Caller` (transport peer plus any presented certificate) and authorizes it.
   - `remote::infer::v2` (`/weirdnet-agent/infer/2`, CBOR): priorities with a queue
-    (`Queued{position}`), sampling, seed, response format, tools, raw mode, reasoning and tool-call
+    (`Queued{position}`), sampling, seed, response format, tools, raw mode, a per-request answer
+    cache mode (`CacheMode`: use, bypass, refresh), reasoning and tool-call
     frames with character offsets, usage and metadata, embeddings, and an assistant prefix so an
     answer can resume on another node. `infer/1` (JSON) is still served for 0.3 callers.
   - `remote::pool::Pool`: tries nodes in order, cancels a stalled stream (max(15 s, 3× the token

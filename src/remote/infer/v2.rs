@@ -36,6 +36,11 @@
 //!   the answer (a cache hit, say); `Done` carries the same metadata for everyone.
 //! - **Raw mode** is for inference node → model node calls: assembled messages only, no context
 //!   lookups, caches or stand-ins.
+//! - **Answer cache:** [`Request::cache`] ([`CacheMode`]) lets an asker skip a node's answer
+//!   cache for one request without raw mode: `bypass` neither reads nor stores, `refresh` skips
+//!   the read and stores the fresh answer. The field is left off the wire when it is `use`, so
+//!   older nodes read the request as before; they don't know the field and may still answer from
+//!   their cache ([`Meta::cache_hit`] says so).
 //! - **Embeddings:** one `Embedding` frame per input, the vector as a CBOR byte string of
 //!   little-endian `f32`.
 
@@ -74,6 +79,36 @@ pub enum Priority {
     Interactive,
     Batch,
     Background,
+}
+
+/// Whether a node's answer cache may serve or keep this request's answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CacheMode {
+    /// Read and store as the cache sees fit.
+    #[default]
+    Use,
+    /// Neither read nor store: always run the model (evals, fresh weights).
+    Bypass,
+    /// Skip the read, run the model and store the fresh answer over the old one.
+    Refresh,
+}
+
+impl CacheMode {
+    pub fn is_use(&self) -> bool {
+        *self == CacheMode::Use
+    }
+
+    /// A stored answer may stand in for the model.
+    pub fn may_read(&self) -> bool {
+        *self == CacheMode::Use
+    }
+
+    /// The finished answer may be kept.
+    pub fn may_store(&self) -> bool {
+        matches!(self, CacheMode::Use | CacheMode::Refresh)
+    }
 }
 
 /// A conversation kept by the inference node (synced context), instead of inline messages.
@@ -230,6 +265,10 @@ pub struct Request {
     /// the flag; askers that don't set it never get the frame.
     #[serde(default, skip_serializing_if = "is_false")]
     pub early_meta: bool,
+    /// Answer cache use (0.5.1 and later; see [`CacheMode`]). Not sent when `use`; nodes that
+    /// predate it ignore it.
+    #[serde(default, skip_serializing_if = "CacheMode::is_use")]
+    pub cache: CacheMode,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -313,6 +352,18 @@ impl Request {
 
     pub fn with_cert(mut self, cert: Vec<u8>) -> Self {
         self.cert = Some(cert);
+        self
+    }
+
+    /// How the serving node's answer cache treats this request (see [`CacheMode`]).
+    pub fn with_cache(mut self, cache: CacheMode) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    /// Wait for the requested model to load rather than take a stand-in.
+    pub fn with_wait_for_model(mut self, wait: bool) -> Self {
+        self.wait_for_model = wait;
         self
     }
 

@@ -9,8 +9,8 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::v2::{
-    self, ClientFrame, ContextRef, EmbedBackend, EmbedRequest, Finish, InferBackend, Output, Prefix, Priority, Request, ResponseFormat, Resume,
-    ServerFrame, Usage, bytes_f32, f32_bytes,
+    self, CacheMode, ClientFrame, ContextRef, EmbedBackend, EmbedRequest, Finish, InferBackend, Output, Prefix, Priority, Request, ResponseFormat,
+    Resume, ServerFrame, Usage, bytes_f32, f32_bytes,
 };
 use super::{Admission, ClientMsg, InferHost, InferRequest, PROTOCOL as V1, RemoteModel, Route, serve as serve_v1};
 use crate::cancel::CancelToken;
@@ -552,6 +552,44 @@ async fn remote_model_resume_is_opt_in() {
     assert_eq!(err, ModelError::Failed("a: connection closed".into()));
     let turn = RemoteModel::new(dialer, nodes).with_resume(true).complete(&[], &[], &DeltaSink::discard(), &CancelToken::new()).await.unwrap();
     assert_eq!(turn.text, "Hello");
+}
+
+#[test]
+fn cache_mode_stays_off_the_wire_by_default() {
+    let plain = Request::messages(vec![Message::user("q")]);
+    assert_eq!(plain.cache, CacheMode::Use);
+    let v = serde_json::to_value(&plain).unwrap();
+    assert!(v.get("cache").is_none(), "{v}");
+    // A request from an older node (no `cache` field) reads as `use`.
+    let back: Request = from_cbor(&to_cbor(&plain).unwrap()).unwrap();
+    assert_eq!(back.cache, CacheMode::Use);
+
+    for (mode, name) in [(CacheMode::Bypass, "bypass"), (CacheMode::Refresh, "refresh")] {
+        let req = Request::messages(vec![Message::user("q")]).with_cache(mode);
+        assert_eq!(serde_json::to_value(&req).unwrap()["cache"], json!(name));
+        let back: Request = from_cbor(&to_cbor(&req).unwrap()).unwrap();
+        assert_eq!(back.cache, mode);
+        assert_eq!(req.next_attempt().cache, mode, "retries keep the cache mode");
+    }
+
+    // Older nodes skip the unknown field and still read the request.
+    #[derive(serde::Deserialize)]
+    struct Older {
+        id: String,
+        #[serde(default)]
+        wait_for_model: bool,
+    }
+    let req = Request::messages(vec![Message::user("q")]).with_cache(CacheMode::Bypass).with_wait_for_model(true);
+    let old: Older = from_cbor(&to_cbor(&req).unwrap()).unwrap();
+    assert_eq!((old.id.as_str(), old.wait_for_model), (req.id.as_str(), true));
+}
+
+#[test]
+fn cache_mode_reads_and_stores() {
+    assert!(CacheMode::Use.may_read() && CacheMode::Use.may_store());
+    assert!(!CacheMode::Bypass.may_read() && !CacheMode::Bypass.may_store());
+    assert!(!CacheMode::Refresh.may_read() && CacheMode::Refresh.may_store());
+    assert!(!Request::prompt("p").with_wait_for_model(true).with_wait_for_model(false).wait_for_model);
 }
 
 #[test]
