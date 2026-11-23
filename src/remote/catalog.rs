@@ -76,6 +76,11 @@ pub struct CatalogModel {
     /// Inputs it takes beyond text (images, audio). Empty: text only.
     #[serde(default, skip_serializing_if = "Modalities::is_text")]
     pub inputs: Modalities,
+    /// For a LoRA adapter served on a base model: the base's id. Requests name the adapter's own
+    /// id; apps may show it as a variant of the base. Not sent for models; catalogs from 0.5.1
+    /// and earlier lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 impl CatalogModel {
@@ -102,6 +107,17 @@ impl CatalogModel {
     pub fn with_inputs(mut self, inputs: Modalities) -> Self {
         self.inputs = inputs;
         self
+    }
+
+    /// Marks it as a LoRA adapter on base model `base`.
+    pub fn with_base(mut self, base: impl Into<String>) -> Self {
+        self.base = Some(base.into());
+        self
+    }
+
+    /// Whether it is a LoRA adapter on another model.
+    pub fn is_adapter(&self) -> bool {
+        self.base.is_some()
     }
 
     /// A chat model that can read input needing `needed`.
@@ -366,6 +382,17 @@ mod tests {
         assert!(!b.windows(6).any(|w| w == b"inputs"), "text-only entries look as before");
         let v = CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(Modalities::VISION);
         assert_eq!(crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&v).unwrap()).unwrap(), v);
+    }
+
+    #[test]
+    fn base_is_optional_on_the_wire() {
+        let plain = CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm);
+        let b = crate::remote::to_cbor(&plain).unwrap();
+        assert!(!b.windows(4).any(|w| w == b"base"), "models look as before");
+        assert!(!plain.is_adapter());
+        let a = CatalogModel::new("qwen+tune", Purpose::Chat, ModelState::Warm).with_base("qwen");
+        assert!(a.is_adapter());
+        assert_eq!(crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&a).unwrap()).unwrap(), a);
     }
 
     #[test]

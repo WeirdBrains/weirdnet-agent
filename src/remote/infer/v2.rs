@@ -269,6 +269,12 @@ pub struct Request {
     /// predate it ignore it.
     #[serde(default, skip_serializing_if = "CacheMode::is_use")]
     pub cache: CacheMode,
+    /// How strongly a LoRA adapter applies for this request, when `model` names one on an engine
+    /// that scales adapters per request (llama.cpp). `None`: the adapter's configured scale.
+    /// Ignored for base models. Not sent when `None`; nodes that predate it (0.5.1 and earlier)
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_scale: Option<f32>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -358,6 +364,13 @@ impl Request {
     /// How the serving node's answer cache treats this request (see [`CacheMode`]).
     pub fn with_cache(mut self, cache: CacheMode) -> Self {
         self.cache = cache;
+        self
+    }
+
+    /// Applies the requested LoRA adapter at `scale` for this request (see
+    /// [`Request::adapter_scale`]).
+    pub fn with_adapter_scale(mut self, scale: f32) -> Self {
+        self.adapter_scale = Some(scale);
         self
     }
 

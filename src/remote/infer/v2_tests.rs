@@ -585,6 +585,24 @@ fn cache_mode_stays_off_the_wire_by_default() {
 }
 
 #[test]
+fn adapter_scale_stays_off_the_wire_unless_set() {
+    let plain = Request::messages(vec![Message::user("q")]).with_model("qwen+tune");
+    let v = serde_json::to_value(&plain).unwrap();
+    assert!(v.get("adapter_scale").is_none(), "{v}");
+    let req = plain.with_adapter_scale(0.25);
+    let back: Request = from_cbor(&to_cbor(&req).unwrap()).unwrap();
+    assert_eq!(back.adapter_scale, Some(0.25));
+    assert_eq!(req.next_attempt().adapter_scale, Some(0.25), "retries keep the scale");
+    // Nodes that predate it read the request without it.
+    #[derive(serde::Deserialize)]
+    struct Older {
+        model: Option<String>,
+    }
+    let old: Older = from_cbor(&to_cbor(&req).unwrap()).unwrap();
+    assert_eq!(old.model.as_deref(), Some("qwen+tune"));
+}
+
+#[test]
 fn cache_mode_reads_and_stores() {
     assert!(CacheMode::Use.may_read() && CacheMode::Use.may_store());
     assert!(!CacheMode::Bypass.may_read() && !CacheMode::Bypass.may_store());

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Request::adapter_scale` and `with_adapter_scale`: how strongly a LoRA adapter applies for one request. Left off the wire when unset.
+- `CatalogModel::base`, `with_base` and `is_adapter`: a LoRA adapter's base model, so apps can label adapters. Left off the wire for models.
+
 ## [0.5.1] - 2026-11-22
 
 ### Added
