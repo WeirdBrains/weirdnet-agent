@@ -2,6 +2,10 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-23: released 0.5.2 (adapter scale, catalog base)
+
+What changed: `Request::adapter_scale`/`with_adapter_scale` (infer/2) and `CatalogModel::base`/`with_base`/`is_adapter` (catalog/1), both off the wire when unset, for LoRA adapters (weirdnet-backends 0.4.1, Ymir, Bragi). Checks: fmt, clippy `-D warnings --all-features`, tests `--all-features`, `cargo doc -D warnings`. Not tested: nothing beyond the wire round trips; the fields are optional, so older nodes read the requests. Released with `scripts/weirdnet_release.py` (approved by Michael, 2026-11-23). Release commit [`cd51630`](https://github.com/WeirdBrains/weirdnet-agent/commit/cd51630e280b6ebbd2dd5f8fdc6cf3114d7f36d3), tag [`v0.5.2`](https://github.com/WeirdBrains/weirdnet-agent/releases/tag/v0.5.2), on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.2) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.2).
+
 ## 2026-11-22: released 0.5.1
 
 What changed: released with `scripts/weirdnet_release.py` (approved by Michael, 2026-11-22). Release commit [`c2b7b0a`](https://github.com/WeirdBrains/weirdnet-agent/commit/c2b7b0aea601bcda61a37dcf6bbd39f2efd66d13), tag [`v0.5.1`](https://github.com/WeirdBrains/weirdnet-agent/releases/tag/v0.5.1), on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.1) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.1). The script first stopped at `cargo publish` (no registry token in the build environment); the tag was already pushed, so it was finished with `weirdnet_release.py crates --tag v0.5.1`.
