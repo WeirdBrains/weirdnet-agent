@@ -2,6 +2,18 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: released 0.5.5 (weirdnet-sync 0.8)
+
+What changed: released with `scripts/weirdnet_release.py --patch` from [`7ab6ea3`](https://github.com/WeirdBrains/weirdnet-agent/commit/7ab6ea3a4910955fe32b6ccaf198ee83a6d3b0e2) (CI green). Release commit [`fc65eb9`](https://github.com/WeirdBrains/weirdnet-agent/commit/fc65eb9f0caa604592dce545cad6c1a6b6a79b13) (CI green), tag [`v0.5.5`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.5), on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.5) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.5). No GitHub release page; the tag and the changelog carry the notes.
+
+Release basis: m3talsmith's 2026-11-25 decision to accept weirdnet-sync 0.8 here, under his standing rule of 2026-11-24 for additive Weirdnet patch releases. `cargo semver-checks --all-features` against 0.5.4: no semver update required.
+
+Checks run: CI (including the sync 0.5.3 and 0.7.1 steps), the release script's checks and `cargo publish` verification. `cargo publish` no longer warns about yanked lock entries.
+
+Not tested: no live nodes on mixed sync versions.
+
+What's left and next: [weirdnet-backends](https://github.com/WeirdBrains/weirdnet-backends) 0.4.6 needs this release.
+
 ## 2026-11-25: accept weirdnet-sync 0.8 (for 0.5.5)
 
 What changed: the optional `weirdnet-sync` requirement (features `pool` and `serve`) widens from `>=0.5.2, <0.8` to `>=0.5.2, <0.9`, so apps on [weirdnet-sync](https://crates.io/crates/weirdnet-sync) 0.8 can use this crate. No code changes were needed: the crate only uses `Roster`, `Roster::check_caller` and `CallerCheck`, which 0.8 keeps. Cargo.lock now holds weirdnet-sync 0.8.0, weirdnet-net 0.8.2 and weirdnet-keys 0.1.2 (the yanked 0.5.2, 0.8.0 and 0.1.1 are gone). CI tests the lock (0.8.0) and also 0.5.3 and 0.7.1. README and `serve` docs say 0.5.2 to 0.8. Commit SHA: see the commit that adds this entry.
