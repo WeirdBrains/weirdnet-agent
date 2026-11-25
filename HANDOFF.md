@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: `PoolWatch::retry` (branch `feat/pool-model`)
+
+What changed ([`429bcef`](https://github.com/WeirdBrains/weirdnet-agent/commit/429bcef580c8149c9fbe755f3b2b5bac3ff6b825)): `PoolWatch::retry` wakes the watch from its backoff (up to 30 s) and resets it, so a turn that wants the pool right after a node came back doesn't wait out the backoff. Found by Morph's `feat/ymir-pool` tests, where a turn right after the pool came up still saw it unreachable.
+
+Checks run: `cargo fmt --check`, `cargo build`, `cargo clippy --all-targets` with and without `--all-features` (`-D warnings`), `cargo test --all-features` (120 unit tests, 1 new: a retry after three failed rounds finds the node before the 4 s backoff ends), `cargo test --no-default-features`, `cargo doc --no-deps --all-features` with `-D warnings`.
+
+Not tested: no live Ymir node.
+
+What's left and next: as below. Recommended release: 0.5.3 (all additions are on `#[non_exhaustive]` types, so [weirdnet-model](https://crates.io/crates/weirdnet-model) and [weirdnet-mcp](https://crates.io/crates/weirdnet-mcp), which take `^0.5` / `<0.6`, keep working without new releases); 0.6.0 would need them re-released. Waiting for m3talsmith's OK.
+
 ## 2026-11-25: PoolModel and PoolWatch for a model pool (branch `feat/pool-model`, for 0.6.0)
 
 What changed ([`494661f`](https://github.com/WeirdBrains/weirdnet-agent/commit/494661f320fd418b0f830ab4e2d164c7ea0aecfe)): a new `remote::pool_model` module so apps such as [Morph](https://github.com/WeirdBrains/morph) can run companions on a [Ymir](https://github.com/WeirdBrains/ymir) pool. `PoolModel` is a `ModelBackend` over `Pool::infer` (infer/2): text and reasoning stream, tool calls come back in the turn, cancel stops the node, a node that dies mid-answer resumes on another (`ModelNotice::Continued`), a chosen model that can't read a turn's images or audio is swapped for one that can (`ModelNotice::Rerouted`, opt-out with `with_reroute(false)`), and before any text streamed an optional fallback runs the turn (`ModelNotice::FellBack`). With no fallback, an unreachable pool is the new `ModelError::PoolUnreachable`; a node's own answer (busy, refused) stays `Unavailable`. `PoolWatch` follows catalog/1 subscribe as a `PoolStatus` (searching, live, unreachable with the last catalog), with `chat_models(needs)` for pickers, and `PoolWatch::nodes` (`CatalogNodes`) is the `NodeSource` of the nodes that answered, so turns never go to linked devices that are not inference nodes. Notices reach the UI as `AgentEvent::ModelNotice` through `DeltaSink::notice`; task/1 does not forward them. All additions are on `#[non_exhaustive]` types.
