@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-25
+
 ### Added
 
 - `remote::pool_model::PoolModel`: a model pool (such as Ymir) as one `ModelBackend`, with mid-answer resume, rerouting for images and audio, and an optional local fallback.
