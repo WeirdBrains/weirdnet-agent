@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `CatalogModel::origin` and `license`, with `with_origin`, `with_license` and the `ORIGIN_HUB`, `ORIGIN_UPLOAD` and `ORIGIN_TRAIN` names: where a catalog model came from and its license. Left off the wire when unset.
+
 ## [0.5.3] - 2026-11-25
 
 ### Added

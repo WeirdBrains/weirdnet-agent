@@ -52,7 +52,9 @@ records what happened.
     on nodes that resume; embeddings, background jobs and catalog subscribe with failover. `RemoteModel` is a
     `ModelBackend` over it, with a local fallback before any token has streamed.
   - `remote::catalog` (`/weirdnet-agent/catalog/1`): which models the nodes have, their state and
-    the inputs beyond text they take (`CatalogModel::inputs`; entries without it are text-only).
+    the inputs beyond text they take (`CatalogModel::inputs`; entries without it are text-only),
+    and, when the node says, where each came from (`origin`: `hub`, `upload` or `train`) and its
+    license (`license`).
     `Catalog::route` picks the model for a request with images or audio. The pool uses it, so such
     a request never lands on a text-only model: a named model that can't read it, or a pool with
     no model that can, is a `BadRequest` before any node runs it. Requests with parts skip infer/1
