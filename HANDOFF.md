@@ -2,6 +2,18 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: released 0.5.4 (catalog origin and license)
+
+What changed: [`feat/catalog-origin`](https://github.com/WeirdBrains/weirdnet-agent/tree/feat/catalog-origin) merged to main ([`d638088`](https://github.com/WeirdBrains/weirdnet-agent/commit/d63808834dfba652770ddc933faae5bf77366290), CI green) and released with `scripts/weirdnet_release.py --patch`. Release commit [`3728adf`](https://github.com/WeirdBrains/weirdnet-agent/commit/3728adfc4f9b), tag [`v0.5.4`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.4), on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.4) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.4). No GitHub release page (as with 0.5.2); the tag and the changelog carry the notes.
+
+Release basis: m3talsmith's standing rule of 2026-11-24 for additive Weirdnet patch releases; `cargo semver-checks` against 0.5.3 and 0.5.2 found nothing that needs more than a patch.
+
+Checks run: the release script's checks (fmt, clippy `-D warnings --all-features`, tests `--all-features`, `cargo doc -D warnings`) and `cargo publish` verification.
+
+Not tested: no live Ymir node. `cargo publish` still warns about the yanked `weirdnet-sync` 0.5.2, `weirdnet-keys` 0.1.1 and `weirdnet-net` 0.8.0 in this repo's Cargo.lock (lock only).
+
+What's left and next: Ymir sets `origin`/`license` on its catalog entries from the node records ([weirdnet-backends](https://github.com/WeirdBrains/weirdnet-backends) `ModelEntry::origin`/`license`).
+
 ## 2026-11-25: catalog/1 origin and license (for 0.5.4)
 
 What changed ([`15d76ed`](https://github.com/WeirdBrains/weirdnet-agent/commit/15d76ed245430f56fd61e162aee9080f76d8fc43), branch `feat/catalog-origin`, merged to main with `--no-ff`): `CatalogModel::origin` and `CatalogModel::license` (`Option<String>`, serde default, left off the wire when unset), the builders `with_origin` and `with_license`, and the names `ORIGIN_HUB`, `ORIGIN_UPLOAD` and `ORIGIN_TRAIN` (the same strings as a [weirdnet-model](https://crates.io/crates/weirdnet-model) 0.5.3 provenance origin). Asked for by [Ymir](https://github.com/WeirdBrains/ymir), so apps can show where a pool model came from and its license. `CatalogModel` is `#[non_exhaustive]`, so the new fields are additive: a patch release, 0.5.4.
