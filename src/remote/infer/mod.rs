@@ -115,6 +115,7 @@ pub(crate) fn model_error(e: ModelError) -> RemoteError {
         ModelError::Unavailable(m) => RemoteError::Unavailable { message: m },
         ModelError::Failed(m) => RemoteError::Failed { message: m },
         ModelError::Cancelled => RemoteError::Cancelled,
+        ModelError::PoolUnreachable(m) => RemoteError::Unavailable { message: m },
     }
 }
 

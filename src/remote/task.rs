@@ -132,6 +132,8 @@ fn wire_event(ev: AgentEvent) -> Option<ServerMsg> {
         AgentEvent::Step(step) => ServerMsg::Step { step },
         // Sent with the outcome.
         AgentEvent::Finished { .. } => return None,
+        // task/1 peers know no notice message; it stays on the serving node.
+        AgentEvent::ModelNotice(_) => return None,
     })
 }
 
