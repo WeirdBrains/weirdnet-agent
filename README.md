@@ -79,7 +79,7 @@ Features:
 - `serve`: `Server` serves infer/1, infer/2 and catalog/1 on a `weirdnet-net` node and announces
   it; `RosterAuth` admits only linked devices (`weirdnet-sync` `Roster::check_caller`).
   `RosterAuth::require_roles(&["ymir.inference"], roles)` also needs one of the device roles the
-  user granted (with sync 0.7, `|peer| roster.roles_of(peer)`), refusing others with `role`.
+  user granted (with sync 0.7 or later, `|peer| roster.roles_of(peer)`), refusing others with `role`.
   `Server::start_with(.., ServingExtras::default().tasks(host, auth))` serves task/1 too: each
   task is admitted (`Authorize::admit`, giving `Admitted { peer, roles }`) and built by
   `TaskHost::session_for`, so hosts can scope tools per device or role; the announcement then
@@ -97,7 +97,7 @@ public enums (`AgentEvent::ReasoningDelta` is new).
 
 Inference (`weirdnet-model`) and MCP client transports (`weirdnet-mcp`) are separate; the core
 only defines the traits and protocols they plug into, and only the `pool` and `serve` features
-depend on `weirdnet-net` and `weirdnet-sync` (0.5.2 to 0.7).
+depend on `weirdnet-net` and `weirdnet-sync` (0.5.2 to 0.8).
 
 ## License
 

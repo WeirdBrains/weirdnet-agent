@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Accepts weirdnet-sync 0.8 (the `pool` and `serve` features now take `>=0.5.2, <0.9`).
+
 ## [0.5.4] - 2026-11-25
 
 ### Added

@@ -10,7 +10,7 @@
 //! the peer and the certificate the caller presented. Hosts call it from
 //! [`InferHost::authorize`] and [`CatalogHost::authorize`]. With
 //! [`require_roles`](RosterAuth::require_roles) it also needs one of the device roles the user
-//! granted the caller (the grants in the `weirdnet-sync` 0.7 roster, `Roster::roles_of`).
+//! granted the caller (the grants in the `weirdnet-sync` 0.7 or later roster, `Roster::roles_of`).
 //!
 //! [`Server::start_with`] also serves `/weirdnet-agent/task/1` ([`ServingExtras::tasks`]): each
 //! task is admitted by the given [`Authorize`] and built by [`TaskHost::session_for`].
@@ -32,7 +32,7 @@ use crate::remote::{Admitted, Authorize, Caller, RemoteError, catalog, infer, ta
 /// The roster as it is now (the app keeps it current from `weirdnet-sync`).
 pub type RosterView = Arc<dyn Fn() -> Roster + Send + Sync>;
 
-/// The device roles a peer holds, `None` without a grant. With `weirdnet-sync` 0.7:
+/// The device roles a peer holds, `None` without a grant. With `weirdnet-sync` 0.7 or later:
 /// `Arc::new(move |peer| identity.roster().roles_of(peer))`.
 pub type RoleView = Arc<dyn Fn(&str) -> Option<Vec<String>> + Send + Sync>;
 

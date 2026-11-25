@@ -2,6 +2,18 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: accept weirdnet-sync 0.8 (for 0.5.5)
+
+What changed: the optional `weirdnet-sync` requirement (features `pool` and `serve`) widens from `>=0.5.2, <0.8` to `>=0.5.2, <0.9`, so apps on [weirdnet-sync](https://crates.io/crates/weirdnet-sync) 0.8 can use this crate. No code changes were needed: the crate only uses `Roster`, `Roster::check_caller` and `CallerCheck`, which 0.8 keeps. Cargo.lock now holds weirdnet-sync 0.8.0, weirdnet-net 0.8.2 and weirdnet-keys 0.1.2 (the yanked 0.5.2, 0.8.0 and 0.1.1 are gone). CI tests the lock (0.8.0) and also 0.5.3 and 0.7.1. README and `serve` docs say 0.5.2 to 0.8. Commit SHA: see the commit that adds this entry.
+
+Basis: m3talsmith decided on 2026-11-25 to widen the weirdnet-sync range in weirdnet-agent and weirdnet-backends to include 0.8, and his standing rule of 2026-11-24 covers additive Weirdnet patch releases. Widening an upper bound is additive, so this ships as 0.5.5.
+
+Checks run: `cargo fmt --check`; `cargo clippy --all-targets --all-features -D warnings` and `cargo test --all-features` against weirdnet-sync 0.8.0, 0.7.1 and 0.5.3 (the oldest version in range that is not yanked); `cargo test` with default and no default features; `cargo doc -D warnings`.
+
+Not tested: 0.5.2 itself (yanked); no live nodes on mixed sync versions.
+
+What's left and next: release 0.5.5, then [weirdnet-backends](https://github.com/WeirdBrains/weirdnet-backends) 0.4.6 with the same range.
+
 ## 2026-11-25: released 0.5.4 (catalog origin and license)
 
 What changed: [`feat/catalog-origin`](https://github.com/WeirdBrains/weirdnet-agent/tree/feat/catalog-origin) merged to main ([`d638088`](https://github.com/WeirdBrains/weirdnet-agent/commit/d63808834dfba652770ddc933faae5bf77366290), CI green) and released with `scripts/weirdnet_release.py --patch`. Release commit [`3728adf`](https://github.com/WeirdBrains/weirdnet-agent/commit/3728adfc4f9b), tag [`v0.5.4`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.4), on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.4) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.4). No GitHub release page (as with 0.5.2); the tag and the changelog carry the notes.
