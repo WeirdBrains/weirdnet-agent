@@ -13,6 +13,9 @@
 //! Entries from nodes before 0.5 have none, so they count as text-only. [`Catalog::route`] picks
 //! a model for a request that carries images or audio, and the pool uses it so such a request
 //! never lands on a text-only model.
+//!
+//! Entries may also say where the model came from ([`CatalogModel::origin`]) and its license
+//! ([`CatalogModel::license`]); both are left off the wire when unset, so older peers read them.
 
 use std::sync::Arc;
 
@@ -81,7 +84,23 @@ pub struct CatalogModel {
     /// and earlier lack it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Where the model came from: `hub`, `upload` or `train` (the origins of a
+    /// [weirdnet-model](https://crates.io/crates/weirdnet-model) provenance record), or an app's
+    /// own. Absent when the node does not say, and in catalogs from 0.5.3 and earlier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// The model's license as an SPDX id, or `unknown` when the uploader said so. Absent when the
+    /// node does not say, and in catalogs from 0.5.3 and earlier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
 }
+
+/// [`CatalogModel::origin`]: downloaded from a Hub.
+pub const ORIGIN_HUB: &str = "hub";
+/// [`CatalogModel::origin`]: sent from another machine.
+pub const ORIGIN_UPLOAD: &str = "upload";
+/// [`CatalogModel::origin`]: made by a training run.
+pub const ORIGIN_TRAIN: &str = "train";
 
 impl CatalogModel {
     pub fn new(id: impl Into<String>, purpose: Purpose, state: ModelState) -> Self {
@@ -112,6 +131,18 @@ impl CatalogModel {
     /// Marks it as a LoRA adapter on base model `base`.
     pub fn with_base(mut self, base: impl Into<String>) -> Self {
         self.base = Some(base.into());
+        self
+    }
+
+    /// Where it came from ([`ORIGIN_HUB`], [`ORIGIN_UPLOAD`], [`ORIGIN_TRAIN`] or an app's own).
+    pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
+        self.origin = Some(origin.into());
+        self
+    }
+
+    /// Its license (an SPDX id, or `unknown`).
+    pub fn with_license(mut self, license: impl Into<String>) -> Self {
+        self.license = Some(license.into());
         self
     }
 
@@ -393,6 +424,52 @@ mod tests {
         let a = CatalogModel::new("qwen+tune", Purpose::Chat, ModelState::Warm).with_base("qwen");
         assert!(a.is_adapter());
         assert_eq!(crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&a).unwrap()).unwrap(), a);
+    }
+
+    /// A catalog/1 entry as a 0.5.3 node sends it (and reads it): no origin or license.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct OldModel {
+        id: String,
+        #[serde(default)]
+        purpose: Purpose,
+        #[serde(default)]
+        state: ModelState,
+        #[serde(default)]
+        replicas: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
+    }
+
+    #[test]
+    fn origin_and_license_are_optional_on_the_wire() {
+        let plain = CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm);
+        let b = crate::remote::to_cbor(&plain).unwrap();
+        assert!(!b.windows(6).any(|w| w == b"origin"), "entries without an origin look as before");
+        assert!(!b.windows(7).any(|w| w == b"license"), "entries without a license look as before");
+        let m = CatalogModel::new("qwen+tune", Purpose::Chat, ModelState::Warm).with_origin(ORIGIN_TRAIN).with_license("Apache-2.0");
+        assert_eq!((m.origin.as_deref(), m.license.as_deref()), (Some("train"), Some("Apache-2.0")));
+        assert_eq!(crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&m).unwrap()).unwrap(), m);
+    }
+
+    #[test]
+    fn old_peers_read_and_send_entries_without_origin() {
+        // An old node's entry reads with neither field.
+        let old =
+            OldModel { id: "qwen".into(), purpose: Purpose::Chat, state: ModelState::Warm, replicas: 1, revision: Some("abc".into()), base: None };
+        let m = crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&old).unwrap()).unwrap();
+        assert_eq!((m.origin, m.license, m.revision.as_deref()), (None, None, Some("abc")));
+        // A new node's entry with both fields still reads on an old peer, which skips them.
+        let new = CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm).with_replicas(1).with_origin(ORIGIN_UPLOAD).with_license("unknown");
+        let seen = crate::remote::from_cbor::<OldModel>(&crate::remote::to_cbor(&new).unwrap()).unwrap();
+        assert_eq!(seen, OldModel { revision: None, ..old });
+        // And a whole catalog message from a new node reads on an old peer's catalog type.
+        let msg = ServerMsg::Catalog(Catalog::new(3, vec![new]));
+        assert!(matches!(
+            crate::remote::from_cbor::<ServerMsg>(&crate::remote::to_cbor(&msg).unwrap()).unwrap(),
+            ServerMsg::Catalog(c) if c.models[0].origin.as_deref() == Some("upload")
+        ));
     }
 
     #[test]

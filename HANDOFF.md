@@ -2,6 +2,18 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: catalog/1 origin and license (for 0.5.4)
+
+What changed ([`15d76ed`](https://github.com/WeirdBrains/weirdnet-agent/commit/15d76ed245430f56fd61e162aee9080f76d8fc43), branch `feat/catalog-origin`, merged to main with `--no-ff`): `CatalogModel::origin` and `CatalogModel::license` (`Option<String>`, serde default, left off the wire when unset), the builders `with_origin` and `with_license`, and the names `ORIGIN_HUB`, `ORIGIN_UPLOAD` and `ORIGIN_TRAIN` (the same strings as a [weirdnet-model](https://crates.io/crates/weirdnet-model) 0.5.3 provenance origin). Asked for by [Ymir](https://github.com/WeirdBrains/ymir), so apps can show where a pool model came from and its license. `CatalogModel` is `#[non_exhaustive]`, so the new fields are additive: a patch release, 0.5.4.
+
+Checks run: `cargo fmt --check`, `cargo build`, `cargo clippy --all-targets` with and without `--all-features` (`-D warnings`), `cargo test --all-features` (122 unit tests, 2 new: the fields stay off the wire when unset and round-trip when set; an older peer's entry reads with neither field, and an older peer reads a new entry and catalog message), `cargo test --no-default-features`, `cargo doc --no-deps --all-features` with `-D warnings`, and `cargo semver-checks` against 0.5.3 and 0.5.2 (no semver update required).
+
+Not tested: no live Ymir node; only CBOR round trips against a struct shaped like the 0.5.3 entry.
+
+Release basis: m3talsmith's standing rule of 2026-11-24 allows additive Weirdnet patch releases without asking; minor bumps still need his OK.
+
+What's left and next: release 0.5.4 once CI on main is green; [weirdnet-backends](https://github.com/WeirdBrains/weirdnet-backends) carries the fields in its capability record and [weirdnet-openai](https://github.com/WeirdBrains/weirdnet-openai) shows them in `/v1/models`; Ymir fills `origin`/`license` from the node records when it builds its catalog.
+
 ## 2026-11-25: released 0.5.3 (PoolModel and PoolWatch)
 
 What changed: [`feat/pool-model`](https://github.com/WeirdBrains/weirdnet-agent/tree/feat/pool-model) merged to main with `--no-ff` ([`bfb5962`](https://github.com/WeirdBrains/weirdnet-agent/commit/bfb59622af2302b805a700f6965a4f44ba51fadd)) and released with `scripts/weirdnet_release.py --patch` (approved by m3talsmith, 2026-11-25). Release commit [`3ef94cb`](https://github.com/WeirdBrains/weirdnet-agent/commit/3ef94cbf7a60fe514a23d2c151d705facc7cdb42), tag [`v0.5.3`](https://github.com/WeirdBrains/weirdnet-agent/releases/tag/v0.5.3) (GitHub release with the changelog notes, made with `gh release create` because `release.toml` has no `[github]` files), on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.3) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.3). Additive, so [weirdnet-model](https://crates.io/crates/weirdnet-model) 0.5.3 and [weirdnet-mcp](https://crates.io/crates/weirdnet-mcp) 0.5.3 pick it up without new releases.
