@@ -12,7 +12,7 @@ Not tested: no live Ymir node.
 
 What's left and next: as below. Recommended release: 0.5.3 (all additions are on `#[non_exhaustive]` types, so [weirdnet-model](https://crates.io/crates/weirdnet-model) and [weirdnet-mcp](https://crates.io/crates/weirdnet-mcp), which take `^0.5` / `<0.6`, keep working without new releases); 0.6.0 would need them re-released. Waiting for m3talsmith's OK.
 
-## 2026-11-25: PoolModel and PoolWatch for a model pool (branch `feat/pool-model`, for 0.6.0)
+## 2026-11-25: PoolModel and PoolWatch for a model pool (branch `feat/pool-model`, for 0.5.3)
 
 What changed ([`494661f`](https://github.com/WeirdBrains/weirdnet-agent/commit/494661f320fd418b0f830ab4e2d164c7ea0aecfe)): a new `remote::pool_model` module so apps such as [Morph](https://github.com/WeirdBrains/morph) can run companions on a [Ymir](https://github.com/WeirdBrains/ymir) pool. `PoolModel` is a `ModelBackend` over `Pool::infer` (infer/2): text and reasoning stream, tool calls come back in the turn, cancel stops the node, a node that dies mid-answer resumes on another (`ModelNotice::Continued`), a chosen model that can't read a turn's images or audio is swapped for one that can (`ModelNotice::Rerouted`, opt-out with `with_reroute(false)`), and before any text streamed an optional fallback runs the turn (`ModelNotice::FellBack`). With no fallback, an unreachable pool is the new `ModelError::PoolUnreachable`; a node's own answer (busy, refused) stays `Unavailable`. `PoolWatch` follows catalog/1 subscribe as a `PoolStatus` (searching, live, unreachable with the last catalog), with `chat_models(needs)` for pickers, and `PoolWatch::nodes` (`CatalogNodes`) is the `NodeSource` of the nodes that answered, so turns never go to linked devices that are not inference nodes. Notices reach the UI as `AgentEvent::ModelNotice` through `DeltaSink::notice`; task/1 does not forward them. All additions are on `#[non_exhaustive]` types.
 
@@ -20,7 +20,7 @@ Checks run: `cargo fmt --check`, `cargo clippy --all-targets` with and without `
 
 Not tested: no live Ymir node or Weirdnet network; only in-memory channels.
 
-What's left and next: merge to main and release as 0.6.0 once m3talsmith OKs it (it is additive, so 0.5.3 would also work); Morph's `feat/ymir-pool` branch uses this branch until then.
+What's left and next: merge to main and release as 0.5.3 (additive, on `#[non_exhaustive]` types) once m3talsmith OKs it; Morph's `feat/ymir-pool` branch uses this branch until then.
 
 ## 2026-11-23: released 0.5.2 (adapter scale, catalog base)
 
