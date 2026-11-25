@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
 use super::RemoteError;
@@ -260,6 +260,7 @@ impl NodeSource for CatalogNodes {
 pub struct PoolWatch {
     rx: watch::Receiver<PoolStatus>,
     nodes: CatalogNodes,
+    retry: Arc<Notify>,
     task: JoinHandle<()>,
 }
 
@@ -274,6 +275,8 @@ impl PoolWatch {
         let (tx, rx) = watch::channel(PoolStatus::Searching { last: None });
         let nodes = CatalogNodes::default();
         let known = nodes.clone();
+        let retry = Arc::new(Notify::new());
+        let again = retry.clone();
         let task = tokio::spawn(async move {
             let (timeout, cert) = (probe.options().accept_timeout, probe.options().cert.clone());
             let mut last: Option<Catalog> = None;
@@ -316,17 +319,23 @@ impl PoolWatch {
                 }
                 tx.send_replace(PoolStatus::Unreachable { error: reported(tried.iter(), "no inference node to ask"), last: last.clone() });
                 tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
+                    _ = tokio::time::sleep(backoff) => backoff = (backoff * 2).min(MAX_BACKOFF),
+                    _ = again.notified() => backoff = FIRST_BACKOFF,
                     _ = tx.closed() => return,
                 }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         });
-        Self { rx, nodes, task }
+        Self { rx, nodes, retry, task }
     }
 
     pub fn status(&self) -> PoolStatus {
         self.rx.borrow().clone()
+    }
+
+    /// Asks the nodes again now instead of after the backoff, e.g. when a turn wants the pool
+    /// while it is unreachable. A round already running is followed by one more.
+    pub fn retry(&self) {
+        self.retry.notify_one();
     }
 
     /// A receiver to follow the status elsewhere (a UI thread).

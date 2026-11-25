@@ -374,3 +374,18 @@ async fn the_watch_says_unreachable_and_keeps_the_last_catalog() {
     });
     assert!(forgotten.await.is_ok(), "the node is forgotten once it fails to answer");
 }
+
+#[tokio::test]
+async fn retry_asks_again_without_waiting_out_the_backoff() {
+    let dialer = MemoryDialer::new();
+    let mut watch = PoolWatch::spawn(pool(&dialer, names(&["inference"])));
+    // Three failed rounds: the next retry would be 4 s away.
+    for _ in 0..3 {
+        status_until(&mut watch, |s| matches!(s, PoolStatus::Unreachable { .. })).await;
+        watch.changed().await;
+    }
+    node(&dialer, "inference", Script::new(false, vec![Step::Text("ok")]), feed(vec![gemma()]), None, false);
+    watch.retry();
+    let live = tokio::time::timeout(Duration::from_millis(1500), status_until(&mut watch, PoolStatus::is_live)).await;
+    assert!(live.is_ok(), "the retry found the node before the backoff ran out");
+}

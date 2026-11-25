@@ -6,6 +6,7 @@
 
 - `remote::pool_model::PoolModel`: a model pool (such as Ymir) as one `ModelBackend`, with mid-answer resume, rerouting for images and audio, and an optional local fallback.
 - `remote::pool_model::PoolWatch`, `PoolStatus` and `CatalogNodes`: a live view of the pool catalog for model pickers, and the nodes that answered it.
+- `PoolWatch::retry`: ask the nodes again now instead of after the backoff (for a turn that wants the pool while it is unreachable).
 - `ModelError::PoolUnreachable`, `ModelNotice`, `AgentEvent::ModelNotice` and `DeltaSink::notice`.
 
 ## [0.5.2] - 2026-11-23
