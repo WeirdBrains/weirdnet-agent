@@ -57,6 +57,14 @@ records what happened.
     a request never lands on a text-only model: a named model that can't read it, or a pool with
     no model that can, is a `BadRequest` before any node runs it. Requests with parts skip infer/1
     nodes. Frames may be up to 32 MiB (8 MiB before 0.5).
+  - `remote::pool_model`: a model cloud such as [Ymir](https://github.com/WeirdBrains/ymir) as one
+    model. `PoolModel` is a `ModelBackend` over the pool with resume on: a node that dies mid-answer
+    continues on another (`ModelNotice::Continued`), a chosen model that can't read a turn's images
+    is swapped for one that can (`ModelNotice::Rerouted`), and before any text streamed an optional
+    fallback runs the turn (`ModelNotice::FellBack`); with none, an unreachable pool is
+    `ModelError::PoolUnreachable`. `PoolWatch` follows the catalog (catalog/1 subscribe) as a
+    `PoolStatus` (live, searching, unreachable) for model pickers, and `PoolWatch::nodes` is the
+    `NodeSource` of the nodes that answered. Notices reach the UI as `AgentEvent::ModelNotice`.
   - `remote::task` runs a whole task on another node (Node companions): events stream back as
     `AgentEvent`s, approval cards are answered on the asking device, cancel stops the task there.
 

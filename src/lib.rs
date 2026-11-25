@@ -46,7 +46,9 @@ pub mod trace;
 pub use budget::{Budget, BudgetExceeded, BudgetTracker, BudgetUsage, ToolTimer};
 pub use cancel::CancelToken;
 pub use identity::{AgentId, AgentIdentity, AgentKind};
-pub use model::{Content, ContentPart, DeltaSink, ImageUrl, InputAudio, Message, Modalities, ModelBackend, ModelError, ModelTurn, Role, ToolCall};
+pub use model::{
+    Content, ContentPart, DeltaSink, ImageUrl, InputAudio, Message, Modalities, ModelBackend, ModelError, ModelNotice, ModelTurn, Role, ToolCall,
+};
 pub use policy::{
     ActionRequest, AllowRule, ApprovalPrompt, CompanionScope, Decision, DenyReason, Policy, PolicyError, Scope, SharedPolicy, SiteLevel, SkipNotice,
     StandingAllow, TaskApprovals, Tier, site_of,

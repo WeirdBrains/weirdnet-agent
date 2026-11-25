@@ -13,6 +13,9 @@
 //!   and (opt-in) during an answer, resumes from what it has already shown, cancels a stalled
 //!   stream, and runs jobs. [`infer::RemoteModel`] is a thin [`ModelBackend`](crate::ModelBackend)
 //!   over it.
+//! - [`pool_model`]: a model cloud (for example [Ymir](https://github.com/WeirdBrains/ymir)) as
+//!   one [`ModelBackend`](crate::ModelBackend) with mid-answer resume and a local fallback
+//!   ([`pool_model::PoolModel`]), and a live view of its catalog ([`pool_model::PoolWatch`]).
 //! - [`task`]: run a whole agent task on another node (Node companions). Agent events stream
 //!   back, approval cards are answered on the asking device, and cancel travels the other way.
 //!
@@ -29,6 +32,7 @@ pub mod codec;
 pub mod infer;
 mod memory;
 pub mod pool;
+pub mod pool_model;
 pub mod task;
 
 use async_trait::async_trait;

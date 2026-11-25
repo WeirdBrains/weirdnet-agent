@@ -343,6 +343,27 @@ pub enum ModelError {
     Failed(String),
     #[error("cancelled")]
     Cancelled,
+    /// No inference node of a model pool could be reached (none found, or every one was
+    /// unreachable, timed out or closed before answering). Apps usually fall back to a local
+    /// model on it; [`remote::pool_model::PoolModel`](crate::remote::pool_model::PoolModel) can do that itself.
+    #[error("model pool unreachable: {0}")]
+    PoolUnreachable(String),
+}
+
+/// Where a turn's model runs, when that changes during the turn: shown to the user as a short
+/// note ([`AgentEvent::ModelNotice`]), never part of the turn's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ModelNotice {
+    /// A node failed mid-answer and the answer continues on `node` from `offset` characters,
+    /// with no text repeated.
+    Continued { node: String, offset: u64 },
+    /// The pool could not take the turn before any text streamed (`reason`), so `to` (usually
+    /// the local model) runs it instead.
+    FellBack { reason: String, to: String },
+    /// The chosen model `from` can't read this turn's `needs` (for example "images"), so the
+    /// pool picks a model that can.
+    Rerouted { from: String, needs: String },
 }
 
 /// Where a backend streams text as it is sampled.
@@ -372,6 +393,13 @@ impl DeltaSink {
     pub fn reasoning(&self, delta: impl Into<String>) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(AgentEvent::ReasoningDelta(delta.into()));
+        }
+    }
+
+    /// A note about where the model runs ([`ModelNotice`]).
+    pub fn notice(&self, notice: ModelNotice) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(AgentEvent::ModelNotice(notice));
         }
     }
 }

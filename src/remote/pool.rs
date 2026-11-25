@@ -328,7 +328,7 @@ enum Fail {
 
 /// The error to report when every node failed, kind intact: the last node answer
 /// ([`RemoteError::is_node_answer`]), else the last error; `Unavailable(none)` with no nodes.
-fn reported<'a>(errors: impl DoubleEndedIterator<Item = &'a RemoteError> + Clone, none: &str) -> RemoteError {
+pub(crate) fn reported<'a>(errors: impl DoubleEndedIterator<Item = &'a RemoteError> + Clone, none: &str) -> RemoteError {
     let mut last = errors.clone().rev();
     errors.rev().find(|e| e.is_node_answer()).or_else(|| last.next()).cloned().unwrap_or_else(|| RemoteError::unavailable(none))
 }
@@ -369,6 +369,10 @@ impl Pool {
 
     pub fn options(&self) -> &PoolOptions {
         &self.opts
+    }
+
+    pub(crate) fn dialer(&self) -> &Arc<dyn Dialer> {
+        &self.dialer
     }
 
     pub(crate) fn options_mut(&mut self) -> &mut PoolOptions {

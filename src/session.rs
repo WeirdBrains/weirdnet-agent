@@ -116,6 +116,9 @@ pub enum AgentEvent {
         task_id: String,
         stop: StopReason,
     },
+    /// Where the model runs changed during the turn: it continued on another node, or fell
+    /// back to the local model ([`DeltaSink::notice`](crate::DeltaSink::notice)).
+    ModelNotice(crate::model::ModelNotice),
 }
 
 /// The result of one task.
