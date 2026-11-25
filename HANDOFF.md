@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: released 0.5.3 (PoolModel and PoolWatch)
+
+What changed: [`feat/pool-model`](https://github.com/WeirdBrains/weirdnet-agent/tree/feat/pool-model) merged to main with `--no-ff` ([`bfb5962`](https://github.com/WeirdBrains/weirdnet-agent/commit/bfb59622af2302b805a700f6965a4f44ba51fadd)) and released with `scripts/weirdnet_release.py --patch` (approved by m3talsmith, 2026-11-25). Release commit [`3ef94cb`](https://github.com/WeirdBrains/weirdnet-agent/commit/3ef94cbf7a60fe514a23d2c151d705facc7cdb42), tag [`v0.5.3`](https://github.com/WeirdBrains/weirdnet-agent/releases/tag/v0.5.3) (GitHub release with the changelog notes, made with `gh release create` because `release.toml` has no `[github]` files), on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.3) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.3). Additive, so [weirdnet-model](https://crates.io/crates/weirdnet-model) 0.5.3 and [weirdnet-mcp](https://crates.io/crates/weirdnet-mcp) 0.5.3 pick it up without new releases.
+
+Checks run: on the merge, `cargo fmt --check`, `cargo build`, `cargo clippy --all-targets` with and without `--all-features` (`-D warnings`), `cargo test --all-features` (120 unit tests), `cargo test --no-default-features`, `cargo doc -D warnings`, and CI on main (green); then the release script's checks and `cargo publish` verification.
+
+Not tested: no live Ymir node. `cargo publish` warned that this repo's Cargo.lock holds yanked `weirdnet-sync` 0.5.2, `weirdnet-keys` 0.1.1 and `weirdnet-net` 0.8.0 (dev and lock only; dependents resolve their own versions).
+
+What's left and next: [Morph](https://github.com/WeirdBrains/morph) moves to `=0.5.3` and merges its Ymir pool branch; a `cargo update` here for the yanked lock entries when convenient.
+
 ## 2026-11-25: `PoolWatch::retry` (branch `feat/pool-model`)
 
 What changed ([`429bcef`](https://github.com/WeirdBrains/weirdnet-agent/commit/429bcef580c8149c9fbe755f3b2b5bac3ff6b825)): `PoolWatch::retry` wakes the watch from its backoff (up to 30 s) and resets it, so a turn that wants the pool right after a node came back doesn't wait out the backoff. Found by Morph's `feat/ymir-pool` tests, where a turn right after the pool came up still saw it unreachable.
