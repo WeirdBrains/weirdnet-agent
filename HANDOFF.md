@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-26: per-model media and request limits (for 0.5.7)
+
+What changed: [`282f9e1`](https://github.com/WeirdBrains/weirdnet-agent/commit/282f9e1c4557a95bff29e26afa322b86b8df71f2) adds `MediaLimits` (crate root, `limits` module) and `CatalogModel::limits` with `CatalogModel::with_limits`, for the video-upload work in Bragi and Ymir: `max_images`, `image_tokens`, `image_patch`, `image_edge`, `audio_max_seconds`, `audio_tokens_per_minute` (per minute so rates such as 6.25 per second stay exact and the type stays `Eq + Hash`) and `max_request_bytes`, each `Option`, absent when unknown and never defaulted. Helpers: `image_cost`, `scaled`, `audio_cost`, `audio_tokens_per_second`, `tightest` (stricter per field) and `or` (operator over measured). Unknown limits are left off the wire, so catalog entries look as before and older peers read new ones. The context window stays in `CatalogModel::context`, now documented as the window the node runs with.
+
+Checks run: `cargo fmt --check`; `cargo clippy --all-targets -D warnings` (default and all features); `cargo test` default, `--all-features` (130 unit plus integration) and `--no-default-features`; `cargo doc -D warnings`; `cargo semver-checks` against 0.5.6 (default and all features): no semver update required. New tests cover JSON and CBOR round trips with and without limits, old entries without them, and the cost and merge helpers.
+
+Not tested: real projectors or audio encoders; the numbers come from nodes.
+
+What's left and next: release 0.5.7, then `weirdnet-backends` carries the limits in `Capabilities` and `weirdnet-openai` reports them. Later: `ContentPart::video`, `Modalities::VIDEO`, catalog `inputs.video` and video limits.
+
 ## 2026-11-26: released 0.5.6 (`jobs` feature)
 
 What changed: release commit [`1ce5c32`](https://github.com/WeirdBrains/weirdnet-agent/commit/1ce5c321c58e) (CI green on Linux, macOS and Windows), tag [`v0.5.6`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.6), then `scripts/weirdnet_release.py crates --tag v0.5.6`: on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.6) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.6). No GitHub release page; the tag and the changelog carry the notes.
