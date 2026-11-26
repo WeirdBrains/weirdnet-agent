@@ -24,7 +24,7 @@
 //!
 //! Voters: every device with the role runs a `weirdnet_sync::Voter` for it, with limits that
 //! allow the job's claim time ([`JobPolicy::configure_voter`]). The `jobs` feature needs
-//! weirdnet-sync 0.8.1 or newer.
+//! weirdnet-sync 0.8.2 or newer.
 use std::collections::{BTreeMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -847,6 +847,8 @@ fn run_claim(c: Arc<ClaimInner>) {
             }
             match v.status {
                 JobStatus::Paused => {
+                    // Not an attempt either way: with weirdnet-sync 0.8.2 the owner's pause
+                    // spares the claim in progress even when this lease ran out first.
                     let _ = c.write(JobEvent::Paused { term: Some(c.term) });
                     c.release();
                     c.end(Lost::PausedByOwner);

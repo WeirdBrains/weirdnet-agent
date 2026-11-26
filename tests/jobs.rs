@@ -121,6 +121,26 @@ fn spread(p: &Pool, from: usize) {
     }
 }
 
+/// Device `to`'s view of job `id` once it shows `want`, pulling from device `from` until it does
+/// (a pull on a busy machine can stop early; background syncs may bring part of a log first).
+fn settled(
+    p: &Pool,
+    from: usize,
+    to: usize,
+    id: &str,
+    want: impl Fn(&weirdnet_agent::jobs::JobRecord<TrainJob>) -> bool,
+) -> weirdnet_agent::jobs::JobRecord<TrainJob> {
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        spread(p, from);
+        let r = p.devs[to].board.get(id).unwrap().unwrap();
+        if want(&r) || Instant::now() > end {
+            return r;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// A crash or a cut cable: the device leaves the network.
 fn cut(p: &Pool, i: usize) {
     p.book.lock().unwrap().remove(&p.devs[i].id());
@@ -176,8 +196,7 @@ async fn claim_renew_checkpoint_progress_and_finish() {
     assert_eq!(r.checkpoint.as_ref().map(|c| (c.step, c.holders.len())), Some((200, 2)));
     assert_eq!(r.progress, Some(serde_json::json!({"step": 200})));
     c.finish(b"adapter:abc".to_vec()).await.unwrap();
-    spread(&p, 1);
-    let r = p.devs[0].board.get("t1").unwrap().unwrap();
+    let r = settled(&p, 1, 0, "t1", |r| r.state == JobState::Done);
     assert_eq!((r.state, r.result.as_deref(), r.attempts), (JobState::Done, Some(&b"adapter:abc"[..]), 1));
     assert_eq!(r.progress, Some(serde_json::json!({"step": 250})), "the waiting progress is written when the claim ends");
     let seen = tokio::time::timeout(Duration::from_secs(5), async {
@@ -239,13 +258,15 @@ async fn a_split_pool_never_has_two_holders_and_the_old_term_is_fenced() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retries_wait_out_the_backoff_until_the_attempts_run_out() {
     let p = pool(&[true, true, true]);
-    p.devs[0].board.post(job("t4").with_policy(policy().with_max_attempts(2))).unwrap();
+    // A backoff long enough that slow CI runners still check inside it.
+    p.devs[0].board.post(job("t4").with_policy(policy().with_max_attempts(2).with_retry_backoff(Duration::from_secs(5)))).unwrap();
     let c = claim_when_free(&p.devs[0], "t4", CLAIM * 4).await;
     c.fail("oom", true).await.unwrap();
-    spread(&p, 0);
-    assert_eq!(state(&p.devs[1], "t4"), JobState::Queued);
+    assert_eq!(settled(&p, 0, 1, "t4", |r| r.not_before_ms.is_some()).state, JobState::Queued);
     assert!(matches!(p.devs[1].board.claim("t4", |_| true).await, Err(JobError::NotYet { .. })));
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    let not_before = p.devs[1].board.get("t4").unwrap().unwrap().not_before_ms.expect("a backoff");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    tokio::time::sleep(Duration::from_millis(not_before.saturating_sub(now) + 100)).await;
     let c = claim_when_free(&p.devs[1], "t4", CLAIM * 4).await;
     c.fail("oom again", true).await.unwrap();
     let r = p.devs[1].board.get("t4").unwrap().unwrap();
@@ -265,8 +286,7 @@ async fn pause_resume_and_cancel_use_no_attempts() {
     let c = claim_when_free(&p.devs[0], "t6", CLAIM * 4).await;
     c.checkpoint(cp(1, 10, &p.devs[0].id())).unwrap();
     c.pause().await.unwrap();
-    spread(&p, 0);
-    let r = p.devs[1].board.get("t6").unwrap().unwrap();
+    let r = settled(&p, 0, 1, "t6", |r| r.state == JobState::Paused);
     assert_eq!((r.state, r.attempts), (JobState::Paused, 0));
     assert!(matches!(p.devs[1].board.claim("t6", |_| true).await, Err(JobError::NotClaimable(JobState::Paused))));
     // Device 1 is a service device and not the owner: it can't resume.
@@ -280,8 +300,7 @@ async fn pause_resume_and_cancel_use_no_attempts() {
     spread(&p, 0);
     let lost = tokio::time::timeout(CLAIM * 4, c.lost()).await.expect("paused");
     assert_eq!(lost, Lost::PausedByOwner);
-    spread(&p, 1);
-    let r = p.devs[0].board.get("t6").unwrap().unwrap();
+    let r = settled(&p, 1, 0, "t6", |r| r.state == JobState::Paused && r.attempts == 0);
     assert_eq!((r.state, r.attempts), (JobState::Paused, 0));
     p.devs[0].board.cancel("t6").unwrap();
     assert_eq!(state(&p.devs[0], "t6"), JobState::Cancelled);
