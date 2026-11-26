@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-11-26
+
 ### Added
 
 - Transcription (speech to text) for the video-upload work: `Purpose::Transcribe` (`transcribe` on the wire, the same name as weirdnet-model's `hw::Purpose`) with `Purpose::as_str`, `Purpose::parse` and `Display`; `CatalogModel::transcribes`, `Catalog::transcribers` and `Catalog::route_transcribe`; infer/2 `ClientFrame::Transcribe(TranscribeRequest)` answered by `ServerFrame::Transcript` (a `Transcript` with `Segment`s) and `ServerFrame::Working` keepalives; `TranscribeBackend`, `InferHost::open_transcribe` (default: unavailable) and `Pool::transcribe` returning a `Transcription`. `serve` re-exports `TranscribeBackend`.
