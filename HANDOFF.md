@@ -2,6 +2,18 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: releasing 0.5.6 (`jobs` feature)
+
+What changed: the release of the `jobs` feature from [`51e7802`](https://github.com/WeirdBrains/weirdnet-agent/commit/51e7802c691fdf65ce3a24134bcba6c33eff2246) (CI green on Linux, macOS and Windows) with `scripts/weirdnet_release.py cut --patch`. The crate is published only after CI passes on the release commit (`--skip-crates`, then `crates --tag v0.5.6`). It ships as 0.5.6, not 0.6.0, for the graph reason in the entry below: Ymir also depends on weirdnet-backends `=0.4.5` (`weirdnet-agent ^0.5.2`), so a 0.6.0 would give it two weirdnet-agent crates.
+
+Release basis: m3talsmith's 2026-11-25 decision for Weirdnet releases ("Don't ask about publishing"). `cargo semver-checks` against 0.5.5: no semver update required.
+
+Checks run: `cargo fmt --check`; `cargo clippy --all-targets -D warnings` (default and all features); `cargo test --all-features` (124 unit, 6 job, 2 linked-device, 2 network tests, doc tests) and `--no-default-features` (122 unit); `cargo doc -D warnings`. The linked-device and network timing tests failed once on a heavily loaded machine and passed on three reruns. Ymir's set: a scratch crate with this tree (`jobs,pool,serve`), weirdnet-sync 0.8.2, weirdnet-net `=0.8.2`, weirdnet-backends `=0.4.5`, weirdnet-update 0.2.2 and weirdnet-openai 0.2.3 builds with one weirdnet-agent, one weirdnet-sync and weirdnet-net 0.8.2 (no net bump). weirdnet-sync 0.8.2's `tests/compat_07.rs` passes: a published 0.7.1 device and 0.8.2 share a sealed record both ways, byte for byte.
+
+Not tested: real networks and real training checkpoints; voter sets mixing weirdnet-sync 0.8.0 and 0.8.2 devices.
+
+What's left and next: CI on the release commit, publish, then the jobs guide on [net.weirdbrains.com](https://net.weirdbrains.com).
+
 ## 2026-11-25: jobs on weirdnet-sync 0.8.2; Windows CI fix (for 0.5.6)
 
 What changed: [`ae1be3e`](https://github.com/WeirdBrains/weirdnet-agent/commit/ae1be3e0076636661d3d6c34a80386af07d8f805) and [`63de1c8`](https://github.com/WeirdBrains/weirdnet-agent/commit/63de1c8db6c3d21a6432480c68fa698ee7aae101). CI for the previous push failed on Windows in `retries_wait_out_the_backoff_until_the_attempts_run_out`: the 800 ms backoff ran out before the test checked it on a slow runner. The test now uses a 5 s backoff and waits until the record's `not_before_ms`. Running the job tests six at a time locally then showed a real race: an owner's pause could count the holder's claim as an attempt when the holder's lease ran out (voters stop renewing a paused job) before it recorded its own pause. That is fixed in the fold in [weirdnet-sync 0.8.2](https://crates.io/crates/weirdnet-sync/0.8.2), which `Cargo.lock` now uses and the docs name as the minimum for `jobs`. The tests also re-pull until a device's view settles instead of trusting one pull.
