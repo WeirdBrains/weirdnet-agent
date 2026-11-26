@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-26
+
 ### Added
 
 - `MediaLimits` and `CatalogModel::limits`: optional per-model limits for images per request, image token cost and edge, audio length and token rate, and request bytes, left off the wire when unknown.
