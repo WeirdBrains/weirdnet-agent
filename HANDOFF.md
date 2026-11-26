@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: jobs on weirdnet-sync 0.8.2; Windows CI fix (for 0.5.6)
+
+What changed: [`ae1be3e`](https://github.com/WeirdBrains/weirdnet-agent/commit/ae1be3e0076636661d3d6c34a80386af07d8f805) and [`63de1c8`](https://github.com/WeirdBrains/weirdnet-agent/commit/63de1c8db6c3d21a6432480c68fa698ee7aae101). CI for the previous push failed on Windows in `retries_wait_out_the_backoff_until_the_attempts_run_out`: the 800 ms backoff ran out before the test checked it on a slow runner. The test now uses a 5 s backoff and waits until the record's `not_before_ms`. Running the job tests six at a time locally then showed a real race: an owner's pause could count the holder's claim as an attempt when the holder's lease ran out (voters stop renewing a paused job) before it recorded its own pause. That is fixed in the fold in [weirdnet-sync 0.8.2](https://crates.io/crates/weirdnet-sync/0.8.2), which `Cargo.lock` now uses and the docs name as the minimum for `jobs`. The tests also re-pull until a device's view settles instead of trusting one pull.
+
+Checks run: fmt; clippy (default and all features, `-D warnings`); `cargo test --all-features` (124 unit, 6 job tests), `--no-default-features`; `cargo doc -D warnings`; the job tests 18 times six at a time against 0.8.2, all passing (6 of 18 failed on 0.8.1).
+
+Not tested: as below.
+
+What's left and next: CI, then release 0.5.6.
+
 ## 2026-11-25: `jobs` feature, synced training-style jobs (for 0.5.6)
 
 What changed: a new opt-in `jobs` feature (requested for Ymir's resume-a-training-job-on-another-node work): `JobBoard<P>`, a typed layer over the [weirdnet-sync](https://crates.io/crates/weirdnet-sync/0.8.1) 0.8.1 job log and leases (not a second log), with `JobRecord<P>`, `NewJob<P>`, `JobPolicy`, `CheckpointRef`, `ContentHash`, `Claim<P>` (background renewal, `term`, `fence`, `checkpoint`, `set_holders`, `progress`, `finish`, `fail`, `pause`, `lost`), owner `pause`/`resume`/`cancel`, `list`, `checkpoints` and `watch`. Commits [`9d2abd0`](https://github.com/WeirdBrains/weirdnet-agent/commit/9d2abd0d09f8d13be37c4efc3a6e3b4a558d9c61) and [`154060f`](https://github.com/WeirdBrains/weirdnet-agent/commit/154060fb18a7dc936f4443cf86de188b5c78f6ec). CI now also runs the tests on macOS and Windows; the weirdnet-sync 0.5.3 and 0.7.1 steps test `pool`, `serve` and `testing` (the `jobs` feature needs 0.8.1).
