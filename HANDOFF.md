@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-26: released 0.5.6 (`jobs` feature)
+
+What changed: release commit [`1ce5c32`](https://github.com/WeirdBrains/weirdnet-agent/commit/1ce5c321c58e) (CI green on Linux, macOS and Windows), tag [`v0.5.6`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.6), then `scripts/weirdnet_release.py crates --tag v0.5.6`: on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.6) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.6). No GitHub release page; the tag and the changelog carry the notes.
+
+Checks run: CI on the release commit and `cargo publish` verification; the rest is in the entry below.
+
+Not tested: as below.
+
+What's left and next: the jobs guide on [net.weirdbrains.com](https://net.weirdbrains.com); Ymir swaps its job store stand-in for `JobBoard<TrainJob>`.
+
 ## 2026-11-25: releasing 0.5.6 (`jobs` feature)
 
 What changed: the release of the `jobs` feature from [`51e7802`](https://github.com/WeirdBrains/weirdnet-agent/commit/51e7802c691fdf65ce3a24134bcba6c33eff2246) (CI green on Linux, macOS and Windows) with `scripts/weirdnet_release.py cut --patch`. The crate is published only after CI passes on the release commit (`--skip-crates`, then `crates --tag v0.5.6`). It ships as 0.5.6, not 0.6.0, for the graph reason in the entry below: Ymir also depends on weirdnet-backends `=0.4.5` (`weirdnet-agent ^0.5.2`), so a 0.6.0 would give it two weirdnet-agent crates.
