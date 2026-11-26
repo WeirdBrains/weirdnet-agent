@@ -5,8 +5,9 @@
 //! - [`infer`]: offload one model turn to a stronger node. `/weirdnet-agent/infer/1` (JSON) is
 //!   the original protocol and is still served; [`infer::v2`] (`/weirdnet-agent/infer/2`, CBOR)
 //!   adds priorities and a real queue, jobs with attempts and resume from an assistant prefix,
-//!   offsets on every text frame, reasoning and tool-call frames, usage and metadata, raw mode
-//!   and embeddings.
+//!   offsets on every text frame, reasoning and tool-call frames, usage and metadata, raw mode,
+//!   embeddings and transcription (speech to text, routed to [`catalog::Purpose::Transcribe`]
+//!   models).
 //! - [`catalog`]: `/weirdnet-agent/catalog/1`, the models an inference node offers, queried once
 //!   or subscribed to.
 //! - [`pool`]: the asking side over both. It tries inference nodes in order, fails over before

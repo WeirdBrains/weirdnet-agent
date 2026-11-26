@@ -21,6 +21,14 @@
 //! [`MediaLimits`]: images per request, token cost per image and its edge, audio length and token
 //! rate, request bytes), each absent when the node doesn't know it. Unknown limits are left off
 //! the wire, so peers before 0.5.7 read and send entries unchanged.
+//!
+//! A model may be a speech-to-text model ([`Purpose::Transcribe`], `transcribe` on the wire):
+//! audio in, its transcript out, so a soundtrack can become text for models without audio. It is
+//! never picked for chat; [`Catalog::route_transcribe`] picks one for a transcription request
+//! (infer/2 `Transcribe`). Peers before 0.5.8 can't read that purpose, so [`serve`] leaves such
+//! entries out for askers that don't say they skip what they can't read; [`query`] and
+//! [`subscribe`] say so, and from 0.5.8 an entry this version can't read (a purpose from a newer
+//! version, say) is skipped instead of failing the whole catalog.
 
 use std::sync::Arc;
 
@@ -42,6 +50,42 @@ pub enum Purpose {
     #[default]
     Chat,
     Embedding,
+    /// Speech to text: audio in, its transcript out (infer/2 `Transcribe`). Never picked as a
+    /// chat model. Since 0.5.8; older peers don't see these entries (see the module docs).
+    Transcribe,
+}
+
+impl Purpose {
+    /// The name on the wire and in settings: `chat`, `embedding` or `transcribe` (the same names
+    /// as [weirdnet-model](https://crates.io/crates/weirdnet-model)'s `hw::Purpose`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Purpose::Chat => "chat",
+            Purpose::Embedding => "embedding",
+            Purpose::Transcribe => "transcribe",
+        }
+    }
+
+    /// Parses [`as_str`](Self::as_str)'s names; `None` for anything else.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "chat" => Some(Purpose::Chat),
+            "embedding" => Some(Purpose::Embedding),
+            "transcribe" => Some(Purpose::Transcribe),
+            _ => None,
+        }
+    }
+
+    /// Known to peers before 0.5.8.
+    fn before_transcribe(self) -> bool {
+        matches!(self, Purpose::Chat | Purpose::Embedding)
+    }
+}
+
+impl std::fmt::Display for Purpose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A model's state across the pool.
@@ -172,6 +216,21 @@ impl CatalogModel {
     pub fn accepts(&self, needed: Modalities) -> bool {
         self.purpose == Purpose::Chat && self.inputs.covers(needed)
     }
+
+    /// A speech-to-text model ([`Purpose::Transcribe`]).
+    pub fn transcribes(&self) -> bool {
+        self.purpose == Purpose::Transcribe
+    }
+}
+
+/// Placement order: warm, then busy, loading, loadable.
+fn rank(s: ModelState) -> u8 {
+    match s {
+        ModelState::Warm => 0,
+        ModelState::Busy => 1,
+        ModelState::Loading => 2,
+        _ => 3,
+    }
 }
 
 /// The models on offer. `rev` grows with every change.
@@ -179,7 +238,24 @@ impl CatalogModel {
 #[non_exhaustive]
 pub struct Catalog {
     pub rev: u64,
+    /// The entries. Reading one this version can't (a purpose from a newer version, say) skips
+    /// that entry instead of failing the catalog (since 0.5.8).
+    #[serde(deserialize_with = "readable_models")]
     pub models: Vec<CatalogModel>,
+}
+
+/// The entries this version can read; the rest are skipped.
+fn readable_models<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<CatalogModel>, D::Error> {
+    struct Entry(Option<CatalogModel>);
+    impl<'de> Deserialize<'de> for Entry {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            // Entries hold only strings, numbers, booleans and maps, so a JSON value carries
+            // them whole from CBOR as well as from JSON.
+            let v = serde_json::Value::deserialize(d)?;
+            Ok(Entry(serde_json::from_value(v).ok()))
+        }
+    }
+    Ok(Vec::<Entry>::deserialize(d)?.into_iter().filter_map(|e| e.0).collect())
 }
 
 impl Catalog {
@@ -208,12 +284,6 @@ impl Catalog {
                 _ => Ok(Some(id.to_string())),
             };
         }
-        let rank = |s: ModelState| match s {
-            ModelState::Warm => 0,
-            ModelState::Busy => 1,
-            ModelState::Loading => 2,
-            _ => 3,
-        };
         self.models
             .iter()
             .filter(|m| m.accepts(needed))
@@ -224,9 +294,42 @@ impl Catalog {
                 RemoteError::BadRequest { message: format!("no model in the pool takes {what}") }
             })
     }
+
+    /// The model for a transcription request (infer/2 `Transcribe`): a named model must be a
+    /// speech-to-text model ([`Purpose::Transcribe`]), and with none named the best one is picked
+    /// (warm, then busy, loading, loadable; then more replicas). A named model the catalog does
+    /// not list is left to the node. `BadRequest` when it names a model that does not transcribe
+    /// or nothing here does.
+    pub fn route_transcribe(&self, model: Option<&str>) -> Result<String, RemoteError> {
+        if let Some(id) = model {
+            return match self.find(id) {
+                Some(m) if !m.transcribes() => Err(RemoteError::BadRequest {
+                    message: format!("model `{id}` does not transcribe audio; pick one whose catalog purpose is `transcribe`"),
+                }),
+                _ => Ok(id.to_string()),
+            };
+        }
+        self.transcribers()
+            .min_by_key(|m| (rank(m.state), std::cmp::Reverse(m.replicas)))
+            .map(|m| m.id.clone())
+            .ok_or_else(|| RemoteError::BadRequest { message: "no model in the pool transcribes audio".into() })
+    }
+
+    /// The speech-to-text models.
+    pub fn transcribers(&self) -> impl Iterator<Item = &CatalogModel> {
+        self.models.iter().filter(|m| m.transcribes())
+    }
+
+    /// The catalog as a peer before 0.5.8 can read it: without entries whose purpose it lacks.
+    fn for_older(&self) -> Catalog {
+        Catalog { rev: self.rev, models: self.models.iter().filter(|m| m.purpose.before_transcribe()).cloned().collect() }
+    }
 }
 
-/// Asking node to inference node.
+/// Asking node to inference node. [`query`] and [`subscribe`] also say that the asker skips
+/// entries it can't read (a field older nodes ignore); a node leaves entries peers before 0.5.8
+/// can't read ([`Purpose::Transcribe`]) out of its answer to a message without it, so an app that
+/// sends this type itself sees no transcription models.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -248,6 +351,25 @@ pub enum ClientMsg {
 pub enum ServerMsg {
     Catalog(Catalog),
     Failed { error: RemoteError },
+}
+
+/// [`ClientMsg`] as sent and read from 0.5.8: `skips_unknown` says the asker skips entries it
+/// can't read. Older nodes ignore the field; older askers leave it out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Ask {
+    Query {
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "bytes::opt")]
+        cert: Option<Vec<u8>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        skips_unknown: bool,
+    },
+    Subscribe {
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "bytes::opt")]
+        cert: Option<Vec<u8>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        skips_unknown: bool,
+    },
 }
 
 /// The serving side's catalog (an inference node's merged view).
@@ -296,18 +418,21 @@ impl CatalogHost for CatalogFeed {
 
 /// Serve one catalog/1 stream. `caller` is the transport-authenticated peer; the certificate the
 /// request presents is attached when the transport gave none, and the host authorizes it first.
+/// An asker that doesn't say it skips entries it can't read (one before 0.5.8) gets the catalog
+/// without [`Purpose::Transcribe`] entries, which it could not decode.
 pub async fn serve(mut ch: Channel, caller: Caller, host: &dyn CatalogHost) -> Result<(), RemoteError> {
-    let (cert, follow) = match ch.recv_cbor::<ClientMsg>().await? {
-        Some(ClientMsg::Query { cert }) => (cert, false),
-        Some(ClientMsg::Subscribe { cert }) => (cert, true),
+    let (cert, follow, skips_unknown) = match ch.recv_cbor::<Ask>().await? {
+        Some(Ask::Query { cert, skips_unknown }) => (cert, false, skips_unknown),
+        Some(Ask::Subscribe { cert, skips_unknown }) => (cert, true, skips_unknown),
         None => return Ok(()),
     };
+    let readable = |c: Catalog| if skips_unknown { c } else { c.for_older() };
     let caller = caller.presenting(cert);
     let mut rx = match host.authorize(&caller).and_then(|()| host.watch(&caller)) {
         Ok(rx) => rx,
         Err(error) => return ch.send_cbor(&ServerMsg::Failed { error }).await,
     };
-    let now = rx.borrow_and_update().clone();
+    let now = readable(rx.borrow_and_update().clone());
     ch.send_cbor(&ServerMsg::Catalog(now)).await?;
     if !follow {
         return Ok(());
@@ -318,7 +443,7 @@ pub async fn serve(mut ch: Channel, caller: Caller, host: &dyn CatalogHost) -> R
                 if changed.is_err() {
                     return Ok(());
                 }
-                let now = rx.borrow_and_update().clone();
+                let now = readable(rx.borrow_and_update().clone());
                 ch.send_cbor(&ServerMsg::Catalog(now)).await?;
             }
             m = ch.rx.recv() => match m {
@@ -331,7 +456,7 @@ pub async fn serve(mut ch: Channel, caller: Caller, host: &dyn CatalogHost) -> R
 
 /// Asks once.
 pub async fn query(ch: &mut Channel, cert: Option<Vec<u8>>) -> Result<Catalog, RemoteError> {
-    ch.send_cbor(&ClientMsg::Query { cert }).await?;
+    ch.send_cbor(&Ask::Query { cert, skips_unknown: true }).await?;
     match ch.recv_cbor::<ServerMsg>().await? {
         Some(ServerMsg::Catalog(c)) => Ok(c),
         Some(ServerMsg::Failed { error }) => Err(error),
@@ -341,7 +466,7 @@ pub async fn query(ch: &mut Channel, cert: Option<Vec<u8>>) -> Result<Catalog, R
 
 /// Subscribes and hands every catalog to `on`, until the stream ends (`Ok`) or fails.
 pub async fn subscribe(ch: &mut Channel, cert: Option<Vec<u8>>, mut on: impl FnMut(Catalog)) -> Result<(), RemoteError> {
-    ch.send_cbor(&ClientMsg::Subscribe { cert }).await?;
+    ch.send_cbor(&Ask::Subscribe { cert, skips_unknown: true }).await?;
     loop {
         match ch.recv_cbor::<ServerMsg>().await? {
             Some(ServerMsg::Catalog(c)) => on(c),
@@ -546,5 +671,166 @@ mod tests {
         // map(1) "query" map(1) "cert" bytes(3)
         assert!(b.windows(4).any(|w| w == [0x43, 1, 2, 3]), "{b:x?}");
         assert_eq!(crate::remote::from_cbor::<ClientMsg>(&b).unwrap(), m);
+    }
+
+    fn transcribe_catalog() -> Catalog {
+        Catalog::new(
+            7,
+            vec![
+                CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(Modalities::new(true, true)),
+                CatalogModel::new("nomic", Purpose::Embedding, ModelState::Warm),
+                CatalogModel::new("voxtral-cold", Purpose::Transcribe, ModelState::Loadable).with_inputs(Modalities::new(false, true)),
+                CatalogModel::new("voxtral", Purpose::Transcribe, ModelState::Warm).with_replicas(1).with_inputs(Modalities::new(false, true)),
+                CatalogModel::new("whisper", Purpose::Transcribe, ModelState::Warm).with_replicas(2),
+            ],
+        )
+    }
+
+    #[test]
+    fn transcribe_purpose_names_match_weirdnet_model() {
+        for (p, name) in [(Purpose::Chat, "chat"), (Purpose::Embedding, "embedding"), (Purpose::Transcribe, "transcribe")] {
+            assert_eq!(p.as_str(), name);
+            assert_eq!(p.to_string(), name);
+            assert_eq!(Purpose::parse(name), Some(p));
+            assert_eq!(serde_json::to_string(&p).unwrap(), format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<Purpose>(&format!("\"{name}\"")).unwrap(), p);
+            assert_eq!(crate::remote::from_cbor::<Purpose>(&crate::remote::to_cbor(&p).unwrap()).unwrap(), p);
+        }
+        assert_eq!(Purpose::parse("speech"), None);
+        let m = CatalogModel::new("voxtral", Purpose::Transcribe, ModelState::Warm);
+        assert!(m.transcribes() && !m.accepts(Modalities::TEXT) && !m.accepts(Modalities::AUDIO));
+    }
+
+    #[test]
+    fn route_transcribe_picks_the_best_transcriber() {
+        let c = transcribe_catalog();
+        // Warm before loadable, then more replicas.
+        assert_eq!(c.route_transcribe(None).unwrap(), "whisper");
+        assert_eq!(c.transcribers().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["voxtral-cold", "voxtral", "whisper"]);
+        assert_eq!(c.route_transcribe(Some("voxtral-cold")).unwrap(), "voxtral-cold");
+        // A model the catalog doesn't list is left to the node.
+        assert_eq!(c.route_transcribe(Some("elsewhere")).unwrap(), "elsewhere");
+        for id in ["gemma", "nomic"] {
+            let e = c.route_transcribe(Some(id)).unwrap_err();
+            assert!(matches!(&e, RemoteError::BadRequest { message } if message.contains(id) && message.contains("transcribe")), "{e:?}");
+        }
+        let none = Catalog::new(1, vec![CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm)]);
+        assert!(matches!(none.route_transcribe(None), Err(RemoteError::BadRequest { message }) if message.contains("transcribes")));
+    }
+
+    #[test]
+    fn chat_routing_never_picks_a_transcriber() {
+        let c = Catalog::new(1, vec![CatalogModel::new("voxtral", Purpose::Transcribe, ModelState::Warm).with_inputs(Modalities::new(false, true))]);
+        assert!(matches!(c.route(None, Modalities::AUDIO), Err(RemoteError::BadRequest { .. })));
+        assert!(matches!(c.route(Some("voxtral"), Modalities::AUDIO), Err(RemoteError::BadRequest { .. })));
+        assert_eq!(transcribe_catalog().route(None, Modalities::AUDIO).unwrap().as_deref(), Some("gemma"));
+    }
+
+    #[test]
+    fn transcribers_round_trip_and_unreadable_entries_are_skipped() {
+        let c = transcribe_catalog();
+        assert_eq!(crate::remote::from_cbor::<Catalog>(&crate::remote::to_cbor(&c).unwrap()).unwrap(), c);
+        assert_eq!(serde_json::from_str::<Catalog>(&serde_json::to_string(&c).unwrap()).unwrap(), c);
+        // An entry from a newer version (an unknown purpose) is skipped, not fatal.
+        let json = r#"{"rev":3,"models":[{"id":"a","purpose":"chat","tokens_per_sec":12.5},{"id":"b","purpose":"diarize"},{"id":"c","purpose":"transcribe"}]}"#;
+        let read: Catalog = serde_json::from_str(json).unwrap();
+        assert_eq!(read.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+        assert_eq!(read.models[0].tokens_per_sec, Some(12.5));
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let read: Catalog = crate::remote::from_cbor(&crate::remote::to_cbor(&v).unwrap()).unwrap();
+        assert_eq!(read.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+        // The whole entry still round-trips through CBOR with every field set.
+        let full = Catalog::new(
+            9,
+            vec![
+                CatalogModel::new("q", Purpose::Chat, ModelState::Busy)
+                    .with_speed(31.25)
+                    .with_context(8192)
+                    .with_base("base")
+                    .with_origin(ORIGIN_UPLOAD)
+                    .with_license("MIT")
+                    .with_limits(MediaLimits::new().with_max_images(4).with_max_request_bytes(1 << 25)),
+            ],
+        );
+        assert_eq!(crate::remote::from_cbor::<Catalog>(&crate::remote::to_cbor(&full).unwrap()).unwrap(), full);
+    }
+
+    /// The purposes a peer before 0.5.8 knows, and its strict catalog.
+    #[derive(Debug, PartialEq, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum OldPurpose {
+        Chat,
+        Embedding,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct OldEntry {
+        id: String,
+        #[allow(dead_code)]
+        purpose: OldPurpose,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct OldCatalog {
+        models: Vec<OldEntry>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum OldServerMsg {
+        Catalog(OldCatalog),
+    }
+
+    #[tokio::test]
+    async fn older_askers_get_the_catalog_without_transcribers() {
+        let feed = CatalogFeed::new(anyone());
+        feed.publish(transcribe_catalog().models);
+        // An old peer could not read the full catalog at all.
+        assert!(crate::remote::from_cbor::<OldServerMsg>(&crate::remote::to_cbor(&ServerMsg::Catalog(feed.current())).unwrap()).is_err());
+
+        for follow in [false, true] {
+            // An asker before 0.5.8 sends plain `ClientMsg`s.
+            let (mut ours, theirs) = memory_pair();
+            let f = feed.clone();
+            tokio::spawn(async move { serve(theirs, Caller::new("phone"), &f).await });
+            let ask = if follow { ClientMsg::Subscribe { cert: None } } else { ClientMsg::Query { cert: None } };
+            ours.send_cbor(&ask).await.unwrap();
+            let bytes = ours.rx.recv().await.unwrap().unwrap();
+            let OldServerMsg::Catalog(old) = crate::remote::from_cbor::<OldServerMsg>(&bytes).unwrap();
+            assert_eq!(old.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gemma", "nomic"]);
+        }
+
+        // 0.5.8 askers see everything, on query and on every change.
+        let (mut ours, theirs) = memory_pair();
+        let f = feed.clone();
+        tokio::spawn(async move { serve(theirs, Caller::new("phone"), &f).await });
+        assert_eq!(query(&mut ours, None).await.unwrap().transcribers().count(), 3);
+        let (mut ours, theirs) = memory_pair();
+        let f = feed.clone();
+        tokio::spawn(async move { serve(theirs, Caller::new("phone"), &f).await });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move { subscribe(&mut ours, None, |c| tx.send(c).unwrap()).await });
+        assert_eq!(rx.recv().await.unwrap().models.len(), 5);
+        feed.publish(vec![CatalogModel::new("whisper", Purpose::Transcribe, ModelState::Busy)]);
+        assert_eq!(rx.recv().await.unwrap().route_transcribe(None).unwrap(), "whisper");
+    }
+
+    #[test]
+    fn the_new_ask_reads_on_old_nodes_and_old_asks_read_on_new_ones() {
+        let new = Ask::Query { cert: Some(vec![1, 2]), skips_unknown: true };
+        assert_eq!(
+            crate::remote::from_cbor::<ClientMsg>(&crate::remote::to_cbor(&new).unwrap()).unwrap(),
+            ClientMsg::Query { cert: Some(vec![1, 2]) }
+        );
+        let new = Ask::Subscribe { cert: None, skips_unknown: true };
+        assert_eq!(crate::remote::from_cbor::<ClientMsg>(&crate::remote::to_cbor(&new).unwrap()).unwrap(), ClientMsg::Subscribe { cert: None });
+        let old = ClientMsg::Subscribe { cert: Some(vec![3]) };
+        assert_eq!(
+            crate::remote::from_cbor::<Ask>(&crate::remote::to_cbor(&old).unwrap()).unwrap(),
+            Ask::Subscribe { cert: Some(vec![3]), skips_unknown: false }
+        );
+        // Unset, the flag stays off the wire: the bytes are what 0.5.7 sends.
+        let quiet = Ask::Query { cert: None, skips_unknown: false };
+        assert_eq!(crate::remote::to_cbor(&quiet).unwrap(), crate::remote::to_cbor(&ClientMsg::Query { cert: None }).unwrap());
     }
 }

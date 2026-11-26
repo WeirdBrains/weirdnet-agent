@@ -2,12 +2,12 @@
 //!
 //! ```text
 //! asking node                               serving node
-//!   Infer(Request) | Embed(EmbedRequest) ->
+//!   Infer(Request) | Embed(EmbedRequest) | Transcribe(TranscribeRequest) ->
 //!                                           <- Queued { position } ...   (while waiting for a slot)
 //!                                           <- Accepted { model, attempt, resume }
 //!                                           <- Delta { offset, text } | Reasoning { offset, text }
 //!                                           <- Meta { meta }             (early_meta askers)
-//!                                           <- ToolCall { index, call } | Usage | Embedding ...
+//!                                           <- ToolCall { index, call } | Usage | Embedding | Transcript ...
 //!   Cancel { id } ->                        (any time)
 //!                                           <- Done { finish } | Failed { error } | Cancelled
 //! ```
@@ -43,6 +43,18 @@
 //!   their cache ([`Meta::cache_hit`] says so).
 //! - **Embeddings:** one `Embedding` frame per input, the vector as a CBOR byte string of
 //!   little-endian `f32`.
+//! - **Transcription** (since 0.5.8): a [`TranscribeRequest`] carries one audio clip as a CBOR
+//!   byte string with its format (`wav`, `mp3`, ... as in an `input_audio` part), optional
+//!   language and prompt hints and whether timed segments are wanted. It queues like any request;
+//!   the node answers `Accepted`, `Working` every [`QUEUE_KEEPALIVE`] while the backend runs, one
+//!   `Transcript` frame ([`Transcript`]: the text, the language,
+//!   the audio's length and timed [`Segment`]s when the backend gives them), then `Done` with
+//!   usage and timings. The host serves it through [`InferHost::open_transcribe`] and a
+//!   [`TranscribeBackend`]; an inference node routes it with
+//!   [`Catalog::route_transcribe`](crate::remote::catalog::Catalog::route_transcribe). Nodes
+//!   before 0.5.8 can't read the request and close the stream; the pool reports that as
+//!   `Unsupported` and tries the next node. The whole request must fit in one stream message
+//!   (32 MiB on Weirdnet), so long soundtracks are sent in pieces.
 
 use std::pin::pin;
 use std::sync::Arc;
@@ -444,6 +456,137 @@ impl EmbedRequest {
     }
 }
 
+/// Speech to text for one audio clip (since 0.5.8). The audio travels as raw bytes (a CBOR byte
+/// string), not base64.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TranscribeRequest {
+    pub id: String,
+    /// A speech-to-text model by the serving app's id (`None`: the node picks its transcriber).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The encoded audio.
+    #[serde(with = "bytes")]
+    pub audio: Vec<u8>,
+    /// Its format, as in an `input_audio` part: `wav`, `mp3`, `flac`, `ogg`, ...
+    pub format: String,
+    /// The spoken language (ISO 639-1, such as `en`), if the asker knows it; otherwise the model
+    /// detects it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Text to guide the transcript (names, terms, the previous piece's ending), as OpenAI's
+    /// `prompt`. Backends that take none ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Ask for timed [`Segment`]s. Backends that can't time the text return none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timestamps: bool,
+    #[serde(default)]
+    pub priority: Priority,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "bytes::opt")]
+    pub cert: Option<Vec<u8>>,
+}
+
+impl TranscribeRequest {
+    /// `audio` encoded as `format` (`wav`, `mp3`, ...).
+    pub fn new(audio: Vec<u8>, format: impl Into<String>) -> Self {
+        Self { id: request_id(), audio, format: format.into(), ..Default::default() }
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// The spoken language (ISO 639-1, such as `en`).
+    pub fn with_language(mut self, language: impl Into<String>) -> Self {
+        self.language = Some(language.into());
+        self
+    }
+
+    /// Text to guide the transcript.
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = Some(prompt.into());
+        self
+    }
+
+    /// Ask for timed segments.
+    pub fn with_timestamps(mut self, timestamps: bool) -> Self {
+        self.timestamps = timestamps;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// `BadRequest` unless there is audio and a format. The server checks this before the host
+    /// opens a backend.
+    pub fn check(&self) -> Result<(), RemoteError> {
+        if self.audio.is_empty() {
+            return Err(RemoteError::BadRequest { message: "a transcription request needs audio".into() });
+        }
+        if self.format.trim().is_empty() {
+            return Err(RemoteError::BadRequest { message: "a transcription request needs the audio format (wav, mp3, ...)".into() });
+        }
+        Ok(())
+    }
+}
+
+/// A transcript: the text, and what the backend knows about it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Transcript {
+    /// The whole text.
+    pub text: String,
+    /// The spoken language (ISO 639-1), when the backend says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// The audio's length in milliseconds, when the backend says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Timed pieces of the text, in order, when asked for and the backend can time them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<Segment>,
+}
+
+impl Transcript {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into(), ..Default::default() }
+    }
+
+    pub fn with_language(mut self, language: impl Into<String>) -> Self {
+        self.language = Some(language.into());
+        self
+    }
+
+    pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = Some(duration_ms);
+        self
+    }
+
+    pub fn with_segments(mut self, segments: Vec<Segment>) -> Self {
+        self.segments = segments;
+        self
+    }
+}
+
+/// A timed piece of a [`Transcript`], in milliseconds from the start of the audio.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Segment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+impl Segment {
+    pub fn new(start_ms: u64, end_ms: u64, text: impl Into<String>) -> Self {
+        Self { start_ms, end_ms, text: text.into() }
+    }
+}
+
 /// Token counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -546,7 +689,11 @@ impl Finish {
 pub enum ClientFrame {
     Infer(Request),
     Embed(EmbedRequest),
-    Cancel { id: String },
+    Cancel {
+        id: String,
+    },
+    /// Speech to text (since 0.5.8).
+    Transcribe(TranscribeRequest),
 }
 
 /// Serving node to asking node.
@@ -606,6 +753,17 @@ pub enum ServerFrame {
         id: String,
         meta: Meta,
     },
+    /// The answer to a [`TranscribeRequest`], before `Done` (since 0.5.8).
+    Transcript {
+        id: String,
+        transcript: Transcript,
+    },
+    /// Still at work on an accepted request that streams nothing until it is done
+    /// (transcription): sent every [`QUEUE_KEEPALIVE`] so the asker doesn't take the quiet for a
+    /// stall (since 0.5.8).
+    Working {
+        id: String,
+    },
 }
 
 impl ServerFrame {
@@ -620,6 +778,8 @@ impl ServerFrame {
             | ServerFrame::Embedding { id, .. }
             | ServerFrame::Usage { id, .. }
             | ServerFrame::Meta { id, .. }
+            | ServerFrame::Transcript { id, .. }
+            | ServerFrame::Working { id }
             | ServerFrame::Done { id, .. }
             | ServerFrame::Failed { id, .. }
             | ServerFrame::Cancelled { id } => id,
@@ -722,6 +882,22 @@ pub trait EmbedBackend: Send + Sync {
     /// counts into the reply's [`Finish::usage`]. Default: [`embed`](Self::embed), no count.
     async fn embed_counted(&self, input: &str, cancel: &CancelToken) -> Result<(Vec<f32>, Option<u64>), RemoteError> {
         Ok((self.embed(input, cancel).await?, None))
+    }
+}
+
+/// What serves transcription (since 0.5.8): a speech-to-text model on this node, or an inference
+/// node's routing to one.
+#[async_trait]
+pub trait TranscribeBackend: Send + Sync {
+    fn name(&self) -> String;
+
+    /// The transcript of `request.audio`. Poll `cancel`.
+    async fn transcribe(&self, request: &TranscribeRequest, cancel: &CancelToken) -> Result<Transcript, RemoteError>;
+
+    /// The transcript and token counts, if the backend knows them; they go into the reply's
+    /// [`Finish::usage`]. Default: [`transcribe`](Self::transcribe), no counts.
+    async fn transcribe_counted(&self, request: &TranscribeRequest, cancel: &CancelToken) -> Result<(Transcript, Option<Usage>), RemoteError> {
+        Ok((self.transcribe(request, cancel).await?, None))
     }
 }
 
@@ -828,6 +1004,7 @@ pub async fn serve(mut ch: Channel, caller: Caller, host: &dyn InferHost, admiss
     match ch.recv_cbor::<ClientFrame>().await? {
         Some(ClientFrame::Infer(request)) => serve_infer(ch, caller, host, admission, request).await,
         Some(ClientFrame::Embed(request)) => serve_embed(ch, caller, host, admission, request).await,
+        Some(ClientFrame::Transcribe(request)) => serve_transcribe(ch, caller, host, admission, request).await,
         Some(ClientFrame::Cancel { .. }) | None => Ok(()),
     }
 }
@@ -1028,6 +1205,60 @@ async fn serve_embed(
     }
     let mut finish = Finish::new("stop");
     finish.usage = tokens.map(|n| Usage::new(n, 0));
+    finish.meta.served_by = Some(backend.name());
+    finish.meta.timings.queued_ms = millis(queued);
+    finish.meta.timings.total_ms = millis(started.elapsed());
+    ch.send_cbor(&ServerFrame::Done { id, finish }).await
+}
+
+async fn serve_transcribe(
+    mut ch: Channel,
+    caller: Caller,
+    host: &dyn InferHost,
+    admission: &Admission,
+    mut request: TranscribeRequest,
+) -> Result<(), RemoteError> {
+    let started = Instant::now();
+    let id = request.id.clone();
+    let caller = caller.presenting(request.cert.take());
+    let opened = host.authorize(&caller).and_then(|()| request.check()).and_then(|()| host.open_transcribe(&caller, request.model.as_deref()));
+    let backend = match opened {
+        Ok(b) => b,
+        Err(error) => return ch.send_cbor(&ServerFrame::Failed { id, error }).await,
+    };
+    let _permit = match wait_turn(&mut ch, &id, admission, request.priority).await? {
+        Waited::Go(p) => p,
+        Waited::Gone => return Ok(()),
+    };
+    let queued = started.elapsed();
+    ch.send_cbor(&ServerFrame::Accepted { id: id.clone(), model: backend.name(), attempt: 0, resume: false }).await?;
+    let cancel = CancelToken::new();
+    let mut run = pin!(backend.transcribe_counted(&request, &cancel));
+    let mut keepalive = tokio::time::interval_at(Instant::now() + QUEUE_KEEPALIVE, QUEUE_KEEPALIVE);
+    let result = loop {
+        tokio::select! {
+            r = &mut run => break r,
+            _ = keepalive.tick() => ch.send_cbor(&ServerFrame::Working { id: id.clone() }).await?,
+            m = ch.rx.recv() => match m {
+                Ok(Some(bytes)) if is_cancel(&bytes, &id) => {
+                    cancel.cancel();
+                    return ch.send_cbor(&ServerFrame::Cancelled { id }).await;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    cancel.cancel();
+                    return Ok(());
+                }
+            },
+        }
+    };
+    let (transcript, usage) = match result {
+        Ok(r) => r,
+        Err(error) => return ch.send_cbor(&ServerFrame::Failed { id, error }).await,
+    };
+    ch.send_cbor(&ServerFrame::Transcript { id: id.clone(), transcript }).await?;
+    let mut finish = Finish::new("stop");
+    finish.usage = usage;
     finish.meta.served_by = Some(backend.name());
     finish.meta.timings.queued_ms = millis(queued);
     finish.meta.timings.total_ms = millis(started.elapsed());

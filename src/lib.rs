@@ -14,7 +14,7 @@
 //! - [`model`]: the model backend trait and chat messages, whose [`Content`] is text or parts
 //!   (text, images, audio) with the [`Modalities`] a model needs to read them.
 //! - [`remote`]: protocols between one user's nodes over an app-supplied channel: inference
-//!   (`infer/2` with priorities, queueing, reasoning, tool calls, embeddings and resume; `infer/1`
+//!   (`infer/2` with priorities, queueing, reasoning, tool calls, embeddings, transcription and resume; `infer/1`
 //!   kept for 0.3 nodes), the model catalog, remote tasks (Node companions), and the
 //!   transport-neutral [`remote::pool::Pool`] that fails over and resumes answers across nodes.
 //! - `pool` (feature): the pool over Weirdnet: inference nodes among the user's linked devices.

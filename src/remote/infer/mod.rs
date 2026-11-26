@@ -15,7 +15,7 @@
 //!
 //! - **`/weirdnet-agent/infer/2`** ([`v2`], CBOR): a priority queue with `Queued`, jobs and
 //!   attempts, resume from an assistant prefix, offsets, reasoning and tool-call frames, usage,
-//!   metadata, raw mode and embeddings.
+//!   metadata, raw mode, embeddings and transcription.
 //!
 //! Serving: the app accepts streams of each protocol and hands them, with the transport peer as
 //! a [`Caller`], to [`serve`] or [`v2::serve`]; both ask [`InferHost::authorize`] first and pass
@@ -107,6 +107,15 @@ pub trait InferHost: Send + Sync {
     fn open_embed(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn v2::EmbedBackend>, RemoteError> {
         let _ = (caller, model);
         Err(RemoteError::unavailable("no embedding model on this node"))
+    }
+
+    /// The backend for transcription (infer/2 `Transcribe`, since 0.5.8), for a named
+    /// speech-to-text model or, with `None`, the node's own pick (inference nodes route with
+    /// [`Catalog::route_transcribe`](crate::remote::catalog::Catalog::route_transcribe)). The
+    /// request has been checked ([`v2::TranscribeRequest::check`]). Default: none here.
+    fn open_transcribe(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn v2::TranscribeBackend>, RemoteError> {
+        let _ = (caller, model);
+        Err(RemoteError::unavailable("no transcription model on this node"))
     }
 }
 
@@ -309,6 +318,9 @@ impl ModelBackend for RemoteModel {
 
 #[cfg(test)]
 mod v2_tests;
+
+#[cfg(test)]
+mod transcribe_tests;
 
 #[cfg(test)]
 mod tests_support {

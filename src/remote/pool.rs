@@ -27,8 +27,8 @@
 //!   catalog to ask, the nodes decide (model nodes refuse inputs their model can't read). Such
 //!   requests never go to infer/1 nodes, which predate content parts.
 //!
-//! The pool also queries and subscribes to the [`catalog`], sends embeddings,
-//! and runs [`Job`]s in the background. It has no networking of its own: a [`Dialer`] opens
+//! The pool also queries and subscribes to the [`catalog`], sends embeddings and transcription
+//! requests ([`Pool::transcribe`]), and runs [`Job`]s in the background. It has no networking of its own: a [`Dialer`] opens
 //! channels and a [`NodeSource`] says which nodes to try, in order. The `pool` cargo feature
 //! provides both over `weirdnet-net` (`crate::pool`).
 
@@ -43,7 +43,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use super::catalog::{self, Catalog};
-use super::infer::v2::{self, ClientFrame, EmbedRequest, Finish, Meta, Prefix, Request, Resume, ServerFrame, Usage, chars};
+use super::infer::v2::{
+    self, ClientFrame, EmbedRequest, Finish, Meta, Prefix, Request, Resume, ServerFrame, TranscribeRequest, Transcript, Usage, chars,
+};
 use super::infer::{self as v1, DEFAULT_ACCEPT_TIMEOUT};
 use super::{Channel, Dialer, RemoteError, request_id};
 use crate::cancel::CancelToken;
@@ -314,6 +316,19 @@ pub struct Embeddings {
     pub node: String,
     pub meta: Meta,
     /// Prompt tokens, when the serving node reports them (0.4.1 servers and later).
+    pub usage: Option<Usage>,
+}
+
+/// A transcript and where it came from ([`Pool::transcribe`]).
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct Transcription {
+    pub transcript: Transcript,
+    /// The backend that served it, as its node named it in `Accepted`.
+    pub model: String,
+    pub node: String,
+    pub meta: Meta,
+    /// Token counts, when the serving node reports them.
     pub usage: Option<Usage>,
 }
 
@@ -724,6 +739,91 @@ impl Pool {
                         return Err(Fail::Error(RemoteError::protocol(format!("{} of {} embeddings arrived", got.len(), request.inputs.len()))));
                     }
                     out.vectors = got.into_values().collect();
+                    out.meta = finish.meta;
+                    out.usage = finish.usage;
+                    return Ok(out);
+                }
+                ServerFrame::Failed { error, .. } => return Err(Fail::Error(error)),
+                ServerFrame::Cancelled { .. } => return Err(Fail::Error(RemoteError::Failed { message: "cancelled by the node".into() })),
+                other => return Err(Fail::Error(RemoteError::protocol(format!("unexpected frame {other:?}")))),
+            }
+        }
+    }
+
+    /// The transcript of one audio clip, from the first node that serves it (infer/2, nodes from
+    /// 0.5.8). Node errors fail over to the next node; a `BadRequest` (no audio, or a named model
+    /// that does not transcribe) comes back at once. A node too old to read the request closes
+    /// the stream, which counts as `Unsupported`. With no model named, each node picks its own
+    /// transcriber; to pick one across the pool first, see
+    /// [`Catalog::route_transcribe`](super::catalog::Catalog::route_transcribe).
+    pub async fn transcribe(&self, mut request: TranscribeRequest, cancel: &CancelToken) -> Result<Transcription, RemoteError> {
+        request.check()?;
+        if request.cert.is_none() {
+            request.cert.clone_from(&self.opts.cert);
+        }
+        let mut tried = Vec::new();
+        for node in self.nodes.nodes().await {
+            match self.transcribe_on(&node, &request, cancel).await {
+                Ok(t) => return Ok(t),
+                Err(Fail::Cancelled) => return Err(RemoteError::Cancelled),
+                Err(Fail::Error(e) | Fail::Unsupported(e)) if e.is_request_error() => return Err(e),
+                Err(Fail::Error(e) | Fail::Unsupported(e)) => tried.push(e),
+                Err(Fail::NoResume) => {}
+            }
+            request.id = request_id();
+        }
+        Err(reported(tried.iter(), "no inference node to run on"))
+    }
+
+    async fn transcribe_on(&self, node: &str, request: &TranscribeRequest, cancel: &CancelToken) -> Result<Transcription, Fail> {
+        let mut ch = self.open(node, v2::PROTOCOL, cancel).await?;
+        let id = request.id.clone();
+        ch.send_cbor(&ClientFrame::Transcribe(request.clone())).await.map_err(Fail::Error)?;
+        let mut out = Transcription { node: node.to_string(), ..Default::default() };
+        let mut transcript = None;
+        let mut accepted = false;
+        loop {
+            // Between `Accepted` and the transcript only `Working` keepalives arrive (every
+            // `QUEUE_KEEPALIVE`), so the wait after acceptance is the stall cap.
+            let wait = if accepted { self.opts.stall.max } else { self.opts.accept_timeout };
+            let next = tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = ch.send_cbor(&ClientFrame::Cancel { id }).await;
+                    return Err(Fail::Cancelled);
+                }
+                r = tokio::time::timeout(wait, ch.recv_cbor::<ServerFrame>()) => r,
+            };
+            let frame = match next {
+                Err(_) => {
+                    let _ = ch.send_cbor(&ClientFrame::Cancel { id }).await;
+                    return Err(Fail::Error(if accepted { RemoteError::Stalled { ms: wait.as_millis() as u64 } } else { RemoteError::Timeout }));
+                }
+                Ok(Err(e)) => return Err(Fail::Error(e)),
+                // A node before 0.5.8 can't read the request and closes the stream unanswered.
+                Ok(Ok(None)) if !accepted => {
+                    return Err(Fail::Unsupported(RemoteError::Unsupported {
+                        message: format!("node {node} closed the stream without answering; it may predate transcription (weirdnet-agent 0.5.8)"),
+                    }));
+                }
+                Ok(Ok(None)) => return Err(Fail::Error(RemoteError::Closed)),
+                Ok(Ok(Some(f))) => f,
+            };
+            if frame.id() != id {
+                continue;
+            }
+            match frame {
+                ServerFrame::Queued { .. } if !accepted => {}
+                ServerFrame::Accepted { model, .. } if !accepted => {
+                    accepted = true;
+                    out.model = model;
+                }
+                ServerFrame::Working { .. } if accepted => {}
+                ServerFrame::Transcript { transcript: t, .. } if accepted && transcript.is_none() => transcript = Some(t),
+                ServerFrame::Done { finish, .. } if accepted => {
+                    let Some(t) = transcript else {
+                        return Err(Fail::Error(RemoteError::protocol("transcription finished without a transcript")));
+                    };
+                    out.transcript = t;
                     out.meta = finish.meta;
                     out.usage = finish.usage;
                     return Ok(out);

@@ -24,7 +24,7 @@ use weirdnet_sync::{CallerCheck, Roster};
 
 pub use crate::net::{INFERENCE_APP, channel, decode_cert, encode_cert, stream_limits};
 pub use crate::remote::catalog::{CatalogFeed, CatalogHost};
-pub use crate::remote::infer::v2::{EmbedBackend, InferBackend, ModelAdapter, Output};
+pub use crate::remote::infer::v2::{EmbedBackend, InferBackend, ModelAdapter, Output, TranscribeBackend};
 pub use crate::remote::infer::{Admission, InferHost};
 pub use crate::remote::task::TaskHost;
 use crate::remote::{Admitted, Authorize, Caller, RemoteError, catalog, infer, task};

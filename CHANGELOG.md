@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Transcription (speech to text) for the video-upload work: `Purpose::Transcribe` (`transcribe` on the wire, the same name as weirdnet-model's `hw::Purpose`) with `Purpose::as_str`, `Purpose::parse` and `Display`; `CatalogModel::transcribes`, `Catalog::transcribers` and `Catalog::route_transcribe`; infer/2 `ClientFrame::Transcribe(TranscribeRequest)` answered by `ServerFrame::Transcript` (a `Transcript` with `Segment`s) and `ServerFrame::Working` keepalives; `TranscribeBackend`, `InferHost::open_transcribe` (default: unavailable) and `Pool::transcribe` returning a `Transcription`. `serve` re-exports `TranscribeBackend`.
+
+### Changed
+
+- catalog/1 leaves `transcribe` entries out for askers before 0.5.8, which could not decode them; `catalog::query` and `catalog::subscribe` now say the asker skips entries it can't read (a field older nodes ignore), and a catalog entry this version can't read is skipped instead of failing the whole catalog.
+
 ## [0.5.7] - 2026-11-26
 
 ### Added

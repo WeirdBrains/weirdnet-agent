@@ -44,12 +44,17 @@ records what happened.
   - `remote::infer::v2` (`/weirdnet-agent/infer/2`, CBOR): priorities with a queue
     (`Queued{position}`), sampling, seed, response format, tools, raw mode, a per-request answer
     cache mode (`CacheMode`: use, bypass, refresh), reasoning and tool-call
-    frames with character offsets, usage and metadata, embeddings, and an assistant prefix so an
-    answer can resume on another node. `infer/1` (JSON) is still served for 0.3 callers.
+    frames with character offsets, usage and metadata, embeddings, transcription, and an assistant
+    prefix so an answer can resume on another node. `infer/1` (JSON) is still served for 0.3 callers.
+    Transcription (0.5.8): a `TranscribeRequest` (audio as raw bytes plus its `format`, optional
+    `language`, `prompt` and `timestamps`) is served through `InferHost::open_transcribe` and a
+    `TranscribeBackend`; the node answers `Accepted`, `Working` keepalives, one `Transcript`
+    (`text`, `language`, `duration_ms`, timed `Segment`s) and `Done` with usage.
   - `remote::pool::Pool`: tries nodes in order, cancels a stalled stream (max(15 s, 3× the token
     gap), under the transport's 30 s resume window) and resumes it elsewhere without repeating
     text; continues a stopped answer from a caller's `assistant_prefix` (`Request::continuing`)
-    on nodes that resume; embeddings, background jobs and catalog subscribe with failover. `RemoteModel` is a
+    on nodes that resume; embeddings, transcription (`Pool::transcribe`, a `Transcription`),
+    background jobs and catalog subscribe with failover. `RemoteModel` is a
     `ModelBackend` over it, with a local fallback before any token has streamed.
   - `remote::catalog` (`/weirdnet-agent/catalog/1`): which models the nodes have, their state and
     the inputs beyond text they take (`CatalogModel::inputs`; entries without it are text-only),
@@ -61,7 +66,10 @@ records what happened.
     `Catalog::route` picks the model for a request with images or audio. The pool uses it, so such
     a request never lands on a text-only model: a named model that can't read it, or a pool with
     no model that can, is a `BadRequest` before any node runs it. Requests with parts skip infer/1
-    nodes. Frames may be up to 32 MiB (8 MiB before 0.5).
+    nodes. Frames may be up to 32 MiB (8 MiB before 0.5). Speech-to-text models have
+    `Purpose::Transcribe` (`transcribe` on the wire, 0.5.8) and are never picked for chat;
+    `Catalog::route_transcribe` picks one for a transcription request. Askers before 0.5.8 get the
+    catalog without them, and from 0.5.8 an entry a peer can't read is skipped, not fatal.
   - `remote::pool_model`: a model cloud such as [Ymir](https://github.com/WeirdBrains/ymir) as one
     model. `PoolModel` is a `ModelBackend` over the pool with resume on: a node that dies mid-answer
     continues on another (`ModelNotice::Continued`), a chosen model that can't read a turn's images

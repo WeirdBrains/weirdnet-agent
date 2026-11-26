@@ -2,6 +2,21 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-26: transcription role and route (for 0.5.8)
+
+What changed: the commit that adds this entry adds speech to text for Milestone 2 of the video-upload work in [Ymir](https://github.com/WeirdBrains/ymir) (the `transcribe` role and route in `docs/design/video.md`), all additive on 0.5.x:
+
+- Catalog: `Purpose::Transcribe` (`transcribe` on the wire, the same name as [weirdnet-model](https://crates.io/crates/weirdnet-model) 0.5.4's `hw::Purpose::Transcribe`), `Purpose::as_str`, `Purpose::parse` and `Display`; `CatalogModel::transcribes`, `Catalog::transcribers` and `Catalog::route_transcribe(model)` (a named model must transcribe; with none named the best transcriber: warm, then busy, loading, loadable, then more replicas; a `BadRequest` otherwise). `CatalogModel::accepts` stays chat-only, so `Catalog::route` never picks a transcriber.
+- infer/2: `ClientFrame::Transcribe(TranscribeRequest)` (`audio` as a CBOR byte string, `format`, optional `model`, `language`, `prompt`, `timestamps`, `priority`, `cert`; `check` refuses empty audio or format), answered by `Accepted`, `ServerFrame::Working` every `QUEUE_KEEPALIVE` while the backend runs, one `ServerFrame::Transcript` (`Transcript`: `text`, `language`, `duration_ms`, `segments` of `Segment { start_ms, end_ms, text }`) and `Done` with usage and timings. Hosts serve it through `InferHost::open_transcribe` (default: unavailable) and a `TranscribeBackend` (`transcribe`, `transcribe_counted`); `serve` re-exports `TranscribeBackend`.
+- Pool: `Pool::transcribe` returns a `Transcription` (`transcript`, `model`, `node`, `meta`, `usage`), with failover; a `BadRequest` comes back at once, and a node before 0.5.8 (which closes the stream on the unknown frame) counts as `Unsupported`.
+- Older peers: a peer before 0.5.8 can't decode a `transcribe` entry, and one such entry would fail its whole catalog. So `catalog::serve` leaves those entries out unless the asker says it skips entries it can't read, which `catalog::query` and `catalog::subscribe` now do (a `skips_unknown` field older nodes ignore), and from 0.5.8 an entry this version can't read is skipped instead of failing the catalog. `ClientMsg` is unchanged; an app that sends it itself sees no transcribers.
+
+Checks run: `cargo fmt --check`; `cargo clippy --all-targets -D warnings` with default, all, no default, `pool`, `serve`, `jobs` and `testing` features; `cargo test` default and no default (144 unit), `--all-features` (146 unit plus integration); `cargo doc -D warnings` (default and all features); `cargo semver-checks` against 0.5.7 (default and all features): no semver update required. New tests: purpose names and JSON/CBOR round trips, `route_transcribe` picks and refusals, chat routing never picking a transcriber, unreadable entries skipped, older askers getting the catalog without transcribers (query and subscribe) while 0.5.8 askers see them, the new ask read by old nodes and old asks by new ones; transcription request and transcript wire round trips (audio as a byte string, unset options off the wire), request checks on both sides, the pool end to end with usage and metadata, refusals without failover, old and chat-only nodes failing over, `Working` keepalives through a 10 s backend under a 4 s stall cap, and cancel.
+
+Not tested: a real speech-to-text model or backend (that is [weirdnet-backends](https://crates.io/crates/weirdnet-backends) next); live nodes.
+
+What's left and next: release 0.5.8; then weirdnet-backends serves `TranscribeBackend` for a `transcribe` model (with measured limits from weirdnet-model at load) and Ymir wires the route.
+
 ## 2026-11-26: released 0.5.7 (media limits)
 
 What changed: release commit [`c13308b`](https://github.com/WeirdBrains/weirdnet-agent/commit/c13308bd9820d45142184d51cdb851bcc10dadbb) (CI green on Linux, macOS and Windows), tag [`v0.5.7`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.7), then `scripts/weirdnet_release.py crates --tag v0.5.7`: on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.7), docs on [docs.rs](https://docs.rs/weirdnet-agent/0.5.7).
