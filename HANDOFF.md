@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-26: released 0.5.8 (transcription)
+
+What changed: release commit [`4449a72`](https://github.com/WeirdBrains/weirdnet-agent/commit/4449a72b6bbde5d209152e6639de11d211c03cf8) (CI green on Linux, macOS and Windows), tag [`v0.5.8`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.8), then `scripts/weirdnet_release.py crates --tag v0.5.8`: on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.8), docs on [docs.rs](https://docs.rs/weirdnet-agent/0.5.8).
+
+Checks run: the release script's checks, CI on the feature and release commits, `cargo package --locked` and `cargo publish` verification; the rest is in the entry below.
+
+Not tested: as below.
+
+What's left and next: [weirdnet-backends](https://crates.io/crates/weirdnet-backends) serves a `TranscribeBackend` for `transcribe` models and fills measured limits at load; [Ymir](https://github.com/WeirdBrains/ymir) wires the route (Milestone 2).
+
 ## 2026-11-26: transcription role and route (for 0.5.8)
 
 What changed: the commit that adds this entry adds speech to text for Milestone 2 of the video-upload work in [Ymir](https://github.com/WeirdBrains/ymir) (the `transcribe` role and route in `docs/design/video.md`), all additive on 0.5.x:
