@@ -2,6 +2,18 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-25: `jobs` feature, synced training-style jobs (for 0.5.6)
+
+What changed: a new opt-in `jobs` feature (requested for Ymir's resume-a-training-job-on-another-node work): `JobBoard<P>`, a typed layer over the [weirdnet-sync](https://crates.io/crates/weirdnet-sync/0.8.1) 0.8.1 job log and leases (not a second log), with `JobRecord<P>`, `NewJob<P>`, `JobPolicy`, `CheckpointRef`, `ContentHash`, `Claim<P>` (background renewal, `term`, `fence`, `checkpoint`, `set_holders`, `progress`, `finish`, `fail`, `pause`, `lost`), owner `pause`/`resume`/`cancel`, `list`, `checkpoints` and `watch`. Commits [`9d2abd0`](https://github.com/WeirdBrains/weirdnet-agent/commit/9d2abd0d09f8d13be37c4efc3a6e3b4a558d9c61) and [`154060f`](https://github.com/WeirdBrains/weirdnet-agent/commit/154060fb18a7dc936f4443cf86de188b5c78f6ec). CI now also runs the tests on macOS and Windows; the weirdnet-sync 0.5.3 and 0.7.1 steps test `pool`, `serve` and `testing` (the `jobs` feature needs 0.8.1).
+
+Version: additive and opt-in, so it ships as 0.5.6 rather than 0.6.0, under the 2026-11-20 rule for additive pre-1.0 Weirdnet releases. A 0.6.0 would split the graph for apps that also use weirdnet-backends 0.4.5 (`weirdnet-agent ^0.5.2`) or weirdnet-openai 0.2.3 (`^0.5.4`): two weirdnet-agent crates whose `ModelBackend` traits differ. The weirdnet-sync range stays `>=0.5.2, <0.9`.
+
+Checks run: `cargo fmt --check`; `cargo clippy --all-targets` (default and all features, `-D warnings`); `cargo test --all-features` (124 unit tests, 6 multi-node job tests: claim and renew, a dead holder's lapse and takeover after the wait with resume from the checkpoint, a split pool with fencing, retry backoff and max attempts, pause/resume/cancel without using attempts, eligibility by candidates, role and the app's check), `--no-default-features`; `cargo doc -D warnings`; sync 0.5.3 and 0.7.1 with `pool,serve,testing`; `cargo semver-checks` against 0.5.5 (no semver update required). A scratch crate depending on this tree with `jobs,pool,serve`, weirdnet-sync 0.8.1, weirdnet-net `=0.8.2`, weirdnet-backends `=0.4.5`, weirdnet-update 0.2.2 and weirdnet-openai 0.2.3 resolves to one weirdnet-agent and one weirdnet-sync and builds.
+
+Not tested: real networks and real training checkpoints; voter sets mixing weirdnet-sync 0.8.0 and 0.8.1 devices.
+
+What's left and next: release 0.5.6; [net.weirdbrains.com](https://net.weirdbrains.com) gets a jobs guide.
+
 ## 2026-11-25: released 0.5.5 (weirdnet-sync 0.8)
 
 What changed: released with `scripts/weirdnet_release.py --patch` from [`7ab6ea3`](https://github.com/WeirdBrains/weirdnet-agent/commit/7ab6ea3a4910955fe32b6ccaf198ee83a6d3b0e2) (CI green). Release commit [`fc65eb9`](https://github.com/WeirdBrains/weirdnet-agent/commit/fc65eb9f0caa604592dce545cad6c1a6b6a79b13) (CI green), tag [`v0.5.5`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.5), on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.5) and [docs.rs](https://docs.rs/weirdnet-agent/0.5.5). No GitHub release page; the tag and the changelog carry the notes.
