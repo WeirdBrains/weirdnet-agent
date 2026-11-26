@@ -32,6 +32,7 @@ pub mod cancel;
 pub mod identity;
 #[cfg(feature = "jobs")]
 pub mod jobs;
+pub mod limits;
 pub mod model;
 #[cfg(any(feature = "pool", feature = "serve"))]
 mod net;
@@ -50,6 +51,7 @@ pub mod trace;
 pub use budget::{Budget, BudgetExceeded, BudgetTracker, BudgetUsage, ToolTimer};
 pub use cancel::CancelToken;
 pub use identity::{AgentId, AgentIdentity, AgentKind};
+pub use limits::MediaLimits;
 pub use model::{
     Content, ContentPart, DeltaSink, ImageUrl, InputAudio, Message, Modalities, ModelBackend, ModelError, ModelNotice, ModelTurn, Role, ToolCall,
 };

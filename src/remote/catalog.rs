@@ -16,6 +16,11 @@
 //!
 //! Entries may also say where the model came from ([`CatalogModel::origin`]) and its license
 //! ([`CatalogModel::license`]); both are left off the wire when unset, so older peers read them.
+//!
+//! Entries may carry the model's media and request limits ([`CatalogModel::limits`], a
+//! [`MediaLimits`]: images per request, token cost per image and its edge, audio length and token
+//! rate, request bytes), each absent when the node doesn't know it. Unknown limits are left off
+//! the wire, so peers before 0.5.7 read and send entries unchanged.
 
 use std::sync::Arc;
 
@@ -23,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::{Authorize, Caller, Channel, RemoteError, bytes};
+use crate::limits::MediaLimits;
 use crate::model::Modalities;
 
 /// Stream protocol id.
@@ -68,7 +74,8 @@ pub struct CatalogModel {
     /// Estimated decode speed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_per_sec: Option<f32>,
-    /// Context window in tokens.
+    /// Context window in tokens: the one the node runs the model with (such as llama.cpp's
+    /// `--ctx-size` per slot) when it knows it, not the model's trained maximum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +100,10 @@ pub struct CatalogModel {
     /// node does not say, and in catalogs from 0.5.3 and earlier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /// Media and request limits, each absent when the node doesn't know it (never defaulted).
+    /// Left off the wire when none is known; absent in catalogs from 0.5.6 and earlier.
+    #[serde(default, skip_serializing_if = "MediaLimits::is_unknown")]
+    pub limits: MediaLimits,
 }
 
 /// [`CatalogModel::origin`]: downloaded from a Hub.
@@ -143,6 +154,12 @@ impl CatalogModel {
     /// Its license (an SPDX id, or `unknown`).
     pub fn with_license(mut self, license: impl Into<String>) -> Self {
         self.license = Some(license.into());
+        self
+    }
+
+    /// Its media and request limits.
+    pub fn with_limits(mut self, limits: MediaLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -469,6 +486,56 @@ mod tests {
         assert!(matches!(
             crate::remote::from_cbor::<ServerMsg>(&crate::remote::to_cbor(&msg).unwrap()).unwrap(),
             ServerMsg::Catalog(c) if c.models[0].origin.as_deref() == Some("upload")
+        ));
+    }
+
+    #[test]
+    fn limits_round_trip_and_stay_off_the_wire_when_unknown() {
+        let plain = CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm).with_context(8192);
+        let b = crate::remote::to_cbor(&plain).unwrap();
+        assert!(!b.windows(6).any(|w| w == b"limits"), "entries without limits look as before");
+        assert!(!serde_json::to_string(&plain).unwrap().contains("limits"));
+        let limits = MediaLimits::new()
+            .with_max_images(8)
+            .with_image_tokens(256)
+            .with_image_edge(896)
+            .with_audio_max_seconds(30)
+            .with_audio_tokens_per_minute(1500)
+            .with_max_request_bytes(32 << 20);
+        let m = CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(Modalities::new(true, true)).with_limits(limits);
+        assert_eq!(crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&m).unwrap()).unwrap(), m);
+        assert_eq!(serde_json::from_str::<CatalogModel>(&serde_json::to_string(&m).unwrap()).unwrap(), m);
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(j["limits"]["max_images"], 8);
+        assert_eq!(j["limits"]["max_request_bytes"], 32 << 20);
+        assert!(j["limits"].get("image_patch").is_none(), "unknown fields stay off");
+        // Only some limits known: the rest stay absent.
+        let some = CatalogModel::new("llava", Purpose::Chat, ModelState::Warm).with_limits(MediaLimits::new().with_image_tokens(576));
+        let back = crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&some).unwrap()).unwrap();
+        assert_eq!((back.limits.image_tokens, back.limits.max_images), (Some(576), None));
+    }
+
+    #[test]
+    fn old_peers_read_and_send_entries_without_limits() {
+        // JSON and CBOR from a node before 0.5.7 read with no limits.
+        let old_json = r#"{"id":"qwen","purpose":"chat","state":"warm","replicas":1,"context":4096,"inputs":{"vision":true}}"#;
+        let m: CatalogModel = serde_json::from_str(old_json).unwrap();
+        assert!(m.limits.is_unknown());
+        assert_eq!(m.context, Some(4096));
+        let old =
+            OldModel { id: "qwen".into(), purpose: Purpose::Chat, state: ModelState::Warm, replicas: 1, revision: Some("abc".into()), base: None };
+        let m = crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&old).unwrap()).unwrap();
+        assert!(m.limits.is_unknown());
+        // A new entry with limits still reads on an old peer, which skips them.
+        let new = CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm)
+            .with_replicas(1)
+            .with_limits(MediaLimits::new().with_max_images(2).with_max_request_bytes(1 << 20));
+        let seen = crate::remote::from_cbor::<OldModel>(&crate::remote::to_cbor(&new).unwrap()).unwrap();
+        assert_eq!(seen, OldModel { revision: None, ..old });
+        let msg = ServerMsg::Catalog(Catalog::new(4, vec![new]));
+        assert!(matches!(
+            crate::remote::from_cbor::<ServerMsg>(&crate::remote::to_cbor(&msg).unwrap()).unwrap(),
+            ServerMsg::Catalog(c) if c.models[0].limits.max_images == Some(2)
         ));
     }
 
