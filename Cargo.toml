@@ -22,6 +22,9 @@ pool = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures", "dep:tracing"]
 # Inference side over weirdnet-net: accept infer/1, infer/2 and catalog/1 streams, and check
 # callers against the weirdnet-sync roster.
 serve = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures"]
+# Synced jobs over the weirdnet-sync job log and leases: a typed job board whose jobs another
+# device can claim and resume from the last checkpoint. Needs weirdnet-sync 0.8.1 or newer.
+jobs = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures"]
 
 [dependencies]
 async-trait = "0.1"
@@ -41,3 +44,7 @@ tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-t
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[test]]
+name = "jobs"
+required-features = ["jobs"]

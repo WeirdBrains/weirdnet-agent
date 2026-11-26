@@ -3987,9 +3987,9 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-sync"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55166631ffee9b112660de094d282cf56ca4054ca66bbb76bea89f2244438114"
+checksum = "dd8b5aa05e197067cec8780d085b447363bdbc069b2e29197a8753409bf6f633"
 dependencies = [
  "blake3",
  "cbor4ii",

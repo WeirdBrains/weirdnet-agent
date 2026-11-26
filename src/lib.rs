@@ -18,6 +18,8 @@
 //!   kept for 0.3 nodes), the model catalog, remote tasks (Node companions), and the
 //!   transport-neutral [`remote::pool::Pool`] that fails over and resumes answers across nodes.
 //! - `pool` (feature): the pool over Weirdnet: inference nodes among the user's linked devices.
+//! - `jobs` (feature): synced jobs over the weirdnet-sync job log, claimed under majority-vote
+//!   leases and resumed on another device from their last checkpoint.
 //! - `serve` (feature): serve inference and the catalog on a Weirdnet node, checking callers
 //!   against the device roster.
 //!
@@ -28,6 +30,8 @@
 pub mod budget;
 pub mod cancel;
 pub mod identity;
+#[cfg(feature = "jobs")]
+pub mod jobs;
 pub mod model;
 #[cfg(any(feature = "pool", feature = "serve"))]
 mod net;
