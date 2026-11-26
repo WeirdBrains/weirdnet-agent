@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `jobs` feature: synced jobs over the weirdnet-sync job log (`JobBoard`, `JobRecord`, `NewJob`, `JobPolicy`, `CheckpointRef`, `ContentHash`, `Claim`, `Fence`, `JobFilter`, `JobChange`, `SyncHandle`), claimed under majority-vote leases with a takeover wait, retries with backoff, pause and resume, and resuming on another device from the last checkpoint. Needs weirdnet-sync 0.8.1.
+
 ## [0.5.5] - 2026-11-25
 
 ### Changed

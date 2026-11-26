@@ -84,6 +84,23 @@ Features:
   task is admitted (`Authorize::admit`, giving `Admitted { peer, roles }`) and built by
   `TaskHost::session_for`, so hosts can scope tools per device or role; the announcement then
   lists task/1.
+- `jobs` (0.5.6, needs [weirdnet-sync](https://crates.io/crates/weirdnet-sync) 0.8.1 or newer):
+  synced jobs that another device can pick up from the last checkpoint, for example a training
+  run. `JobBoard::<P>::open(&SyncHandle, kind)` is a typed layer over the weirdnet-sync job log
+  and leases (no second log); apps add only their payload `P`. `post(NewJob)`, `get`, `list`,
+  `checkpoints` (the newest 8) and `watch()` read and write `JobRecord<P>`; `claim(id, eligible)`
+  takes a majority-vote claim among the devices with the job's `JobPolicy::role` (narrowed by
+  `candidates`, plus the app's own check) and returns a `Claim<P>` that renews in the background:
+  `term()` and `fence()` fence once-only effects, `checkpoint(CheckpointRef)` records a pointer
+  (hash, size, holders), `set_holders`, `progress(json)` (at most once per 30 s), `finish`,
+  `fail(reason, retry)` and `pause()`; `lost()` resolves if the lease ran out, a newer term took
+  over, or the owner paused or cancelled the job. The owner `pause`s, `resume`s and `cancel`s.
+  Defaults: 60 s claims renewed every 20 s, a 5 min wait after a lapsed claim before another
+  device may take over, 3 attempts with a 60 s backoff after retryable failures; pauses are not
+  attempts. Every device with the role votes with `JobPolicy::configure_voter`'s limits. Claims
+  from devices outside the role or candidates are ignored by every device and refused by voters.
+  Checkpoints are pointers only: the app moves the bytes. Finished and cancelled jobs older than
+  30 days are left out of `list` unless asked for; they stay in the log.
 - `testing`: `ScriptedModel`, `ScriptedApprover` and `FnTool` for downstream tests.
 
 Migrating from 0.4: `Message::content` is a `Content`, not a `String`. Constructors take
@@ -96,8 +113,8 @@ Migrating from 0.3: implement `InferHost::authorize` (for Weirdnet, `serve::Rost
 public enums (`AgentEvent::ReasoningDelta` is new).
 
 Inference (`weirdnet-model`) and MCP client transports (`weirdnet-mcp`) are separate; the core
-only defines the traits and protocols they plug into, and only the `pool` and `serve` features
-depend on `weirdnet-net` and `weirdnet-sync` (0.5.2 to 0.8).
+only defines the traits and protocols they plug into, and only the `pool`, `serve` and `jobs`
+features depend on `weirdnet-net` and `weirdnet-sync` (0.5.2 to 0.8; `jobs` needs 0.8.1).
 
 ## License
 

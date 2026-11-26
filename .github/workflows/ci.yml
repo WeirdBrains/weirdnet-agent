@@ -20,7 +20,17 @@ jobs:
       - run: cargo test --locked --all-features
       - run: cargo test --locked --no-default-features
       - run: cargo package --locked
-      - name: test against weirdnet-sync 0.5 (oldest allowed)
-        run: cargo update -p weirdnet-sync --precise 0.5.3 && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features
+      - name: test against weirdnet-sync 0.5 (oldest allowed; `jobs` needs 0.8.1)
+        run: cargo update -p weirdnet-sync --precise 0.5.3 && cargo clippy --all-targets --features pool,serve,testing -- -D warnings && cargo test --features pool,serve,testing
       - name: test against weirdnet-sync 0.7
-        run: cargo update -p weirdnet-sync --precise 0.7.1 && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features
+        run: cargo update -p weirdnet-sync --precise 0.7.1 && cargo clippy --all-targets --features pool,serve,testing -- -D warnings && cargo test --features pool,serve,testing
+  test-os:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --all-features
