@@ -84,7 +84,7 @@ Features:
   task is admitted (`Authorize::admit`, giving `Admitted { peer, roles }`) and built by
   `TaskHost::session_for`, so hosts can scope tools per device or role; the announcement then
   lists task/1.
-- `jobs` (0.5.6, needs [weirdnet-sync](https://crates.io/crates/weirdnet-sync) 0.8.1 or newer):
+- `jobs` (0.5.6, needs [weirdnet-sync](https://crates.io/crates/weirdnet-sync) 0.8.2 or newer):
   synced jobs that another device can pick up from the last checkpoint, for example a training
   run. `JobBoard::<P>::open(&SyncHandle, kind)` is a typed layer over the weirdnet-sync job log
   and leases (no second log); apps add only their payload `P`. `post(NewJob)`, `get`, `list`,
@@ -114,7 +114,7 @@ public enums (`AgentEvent::ReasoningDelta` is new).
 
 Inference (`weirdnet-model`) and MCP client transports (`weirdnet-mcp`) are separate; the core
 only defines the traits and protocols they plug into, and only the `pool`, `serve` and `jobs`
-features depend on `weirdnet-net` and `weirdnet-sync` (0.5.2 to 0.8; `jobs` needs 0.8.1).
+features depend on `weirdnet-net` and `weirdnet-sync` (0.5.2 to 0.8; `jobs` needs 0.8.2).
 
 ## License
 

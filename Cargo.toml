@@ -23,7 +23,7 @@ pool = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures", "dep:tracing"]
 # callers against the weirdnet-sync roster.
 serve = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures"]
 # Synced jobs over the weirdnet-sync job log and leases: a typed job board whose jobs another
-# device can claim and resume from the last checkpoint. Needs weirdnet-sync 0.8.1 or newer.
+# device can claim and resume from the last checkpoint. Needs weirdnet-sync 0.8.2 or newer.
 jobs = ["dep:weirdnet-net", "dep:weirdnet-sync", "dep:futures"]
 
 [dependencies]
