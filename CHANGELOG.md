@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Cross-identity pool sharing: let another Weirdnet identity use a pool with its own device certificate (catalog/1 and infer/2 only), without the pool's root identity.
+- `remote::share`: `PoolShare` and `SharedNode`, a versioned share link (owner user id, optional name and expiry, inference node peer ids and addresses) with `wnet-pool1:` token and `weirdnet-pool://share/` link forms (`to_token`, `to_link`, `parse`, `is_share`, `validate`, `is_expired`, `node_ids`, `Display`, `FromStr`), `ShareError`, and the `SHARE_PREFIX`, `SHARE_LINK`, `SHARE_VERSION`, `MAX_SHARE_LEN` and `MAX_SHARE_NODES` constants.
+- `serve`: `GuestAuth` (verifies a guest credential against the guest's user key and the transport peer, then asks the host's `GuestPolicy` per `GuestScope`), `Guest`, `GuestScope`, `GuestPolicy`, `DEFAULT_CLOCK_SKEW`, `SharedPoolAuth` (roster plus optional guests; `identify`, `authorize_for`, `scoped`, `admits_guests`) and `CallerIdentity`.
+- `serve` and `pool`: `encode_credential`, `decode_presented` and `Presented` (a guest credential: the device's `NodeCert` plus its user's public key).
+- `pool`: `connect_shared` (a `Pool` over a `PoolShare`, presenting the guest credential, no roster discovery) and `share_dialer`; re-exports `PoolShare`, `SharedNode` and `ShareError`.
+- `CatalogHost::recheck` (default `Ok`), `catalog::RECHECK_EVERY` and `CatalogFeed::rechecking`: a subscription is re-checked before each update and every 5 s and closed with the refusal.
+
+### Changed
+
+- `RosterAuth::check` also reads a certificate presented inside a guest credential (still checked against the host user's key, so another user's is `wrong-user` as before).
+
 ## [0.5.8] - 2026-11-26
 
 ### Added

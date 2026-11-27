@@ -80,6 +80,12 @@ records what happened.
     `NodeSource` of the nodes that answered. Notices reach the UI as `AgentEvent::ModelNotice`.
   - `remote::task` runs a whole task on another node (Node companions): events stream back as
     `AgentEvent`s, approval cards are answered on the asking device, cancel stops the task there.
+  - `remote::share` (0.5.9): `PoolShare`, a share link for a pool owned by another Weirdnet
+    identity: the owner's user id, an optional name and expiry, and the inference nodes (peer ids
+    and addresses, direct or relay circuit). No secrets. String forms
+    `wnet-pool1:<base64url JSON>` and `weirdnet-pool://share/<base64url JSON>`
+    (`to_token`, `to_link`, `parse`, `Display`/`FromStr`); a higher `v` is refused, unknown
+    fields are ignored.
 
 Features:
 
@@ -112,6 +118,22 @@ Features:
   from devices outside the role or candidates are ignored by every device and refused by voters.
   Checkpoints are pointers only: the app moves the bytes. Finished and cancelled jobs older than
   30 days are left out of `list` unless asked for; they stay in the log.
+- Sharing a pool with another Weirdnet identity (0.5.9, `pool` + `serve`): the guest uses its
+  own device certificate, never the owner's root identity, and gets catalog/1 and infer/2 only.
+  On the owner's inference nodes, `serve::GuestAuth::new(profile, &owner_key, policy)` checks a
+  guest credential (`encode_credential`: the guest's `NodeCert` plus its user public key) as
+  strictly as the roster checks own devices (the key hashes to the user id, the signature
+  verifies, the cert is for the transport peer, not revoked, not issued in the future), then asks
+  the host's `GuestPolicy` with the `Guest` and a `GuestScope` (`Catalog` or `Infer`) on every
+  request. `serve::SharedPoolAuth::new(roster_auth).with_guests(guests)` combines it with the
+  roster for `InferHost::authorize` (`authorize_for(caller, GuestScope::Infer)`), tells hosts
+  who called (`identify`: `CallerIdentity::Own` or `Guest`), and gives a `CatalogFeed` its
+  scoped authorizer; `CatalogFeed::rechecking()` (with the new `CatalogHost::recheck`) closes a
+  revoked guest's subscription within `RECHECK_EVERY` (5 s). Without `with_guests`, and on every
+  host before 0.5.9, guests are refused (`wrong-user`). On the guest's side,
+  `pool::connect_shared(node, &share, &user_key, &cert)` builds a `Pool` over the share's nodes
+  (failover in order, no roster discovery) presenting the guest credential; refusals come back
+  as `RemoteError::Refused` (`not-shared`, `guest-revoked`, or whatever the policy says).
 - `testing`: `ScriptedModel`, `ScriptedApprover` and `FnTool` for downstream tests.
 
 Migrating from 0.4: `Message::content` is a `Content`, not a `String`. Constructors take

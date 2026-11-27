@@ -19,6 +19,8 @@
 //!   ([`pool_model::PoolModel`]), and a live view of its catalog ([`pool_model::PoolWatch`]).
 //! - [`task`]: run a whole agent task on another node (Node companions). Agent events stream
 //!   back, approval cards are answered on the asking device, and cancel travels the other way.
+//! - [`share`]: links to a pool owned by another Weirdnet identity (since 0.5.9); the guest
+//!   presents its own certificate and the owner's nodes decide (`serve::GuestAuth`).
 //!
 //! Transport and identity belong to the app: a [`Dialer`] opens a [`Channel`] to a node, and the
 //! serving side passes the transport-authenticated peer as a [`Caller`] to the serve functions,
@@ -34,6 +36,7 @@ pub mod infer;
 mod memory;
 pub mod pool;
 pub mod pool_model;
+pub mod share;
 pub mod task;
 
 use async_trait::async_trait;

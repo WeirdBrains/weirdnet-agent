@@ -28,6 +28,54 @@ pub fn decode_cert(bytes: &[u8]) -> Result<NodeCert, RemoteError> {
     from_cbor(bytes)
 }
 
+/// A guest credential (since 0.5.9): this device's certificate plus its user's public key
+/// (protobuf), so a node of a *different* user can check the certificate (a [`NodeCert`]
+/// names its user only by id). Present it with requests to a shared pool
+/// (`pool::connect_shared` does). Public: it holds no secret.
+///
+/// Wire: CBOR map `{"guest": 1, "key": <bytes>, "cert": <NodeCert>}`. Hosts before 0.5.9 can't
+/// read it as a certificate and refuse the caller (`wrong-user`), so it never widens access.
+pub fn encode_credential(user_key: &weirdnet_net::PublicKey, cert: &NodeCert) -> Vec<u8> {
+    to_cbor(&CredentialOut { guest: 1, key: &user_key.encode_protobuf(), cert }).unwrap_or_default()
+}
+
+/// What a caller presented: a certificate, and its user's public key when it sent a guest
+/// credential ([`encode_credential`]). Nothing here is checked yet.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Presented {
+    pub cert: NodeCert,
+    /// The user's public key (protobuf), from a guest credential.
+    pub user_key: Option<Vec<u8>>,
+}
+
+/// Reads presented bytes: a guest credential or a bare certificate ([`encode_cert`]).
+pub fn decode_presented(bytes: &[u8]) -> Result<Presented, RemoteError> {
+    if let Ok(c) = from_cbor::<CredentialIn>(bytes) {
+        if c.guest != 1 {
+            return Err(RemoteError::protocol(format!("guest credential version {} is not supported", c.guest)));
+        }
+        return Ok(Presented { cert: c.cert, user_key: Some(c.key) });
+    }
+    Ok(Presented { cert: decode_cert(bytes)?, user_key: None })
+}
+
+#[derive(serde::Serialize)]
+struct CredentialOut<'a> {
+    guest: u32,
+    #[serde(with = "crate::remote::bytes")]
+    key: &'a [u8],
+    cert: &'a NodeCert,
+}
+
+#[derive(serde::Deserialize)]
+struct CredentialIn {
+    guest: u32,
+    #[serde(with = "crate::remote::bytes")]
+    key: Vec<u8>,
+    cert: NodeCert,
+}
+
 struct Tx(mpsc::Sender<Vec<u8>>);
 struct Rx(mpsc::Receiver<Result<Vec<u8>, RemoteError>>);
 

@@ -3918,6 +3918,7 @@ name = "weirdnet-agent"
 version = "0.5.8"
 dependencies = [
  "async-trait",
+ "base64",
  "cbor4ii",
  "futures",
  "serde",

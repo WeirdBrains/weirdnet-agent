@@ -378,19 +378,41 @@ pub trait CatalogHost: Send + Sync {
 
     /// The catalog for this caller, and its changes.
     fn watch(&self, caller: &Caller) -> Result<watch::Receiver<Catalog>, RemoteError>;
+
+    /// Whether a subscriber may still follow the catalog (since 0.5.9): asked before every
+    /// update a subscription sends and every [`RECHECK_EVERY`]; an error closes the subscription
+    /// with that refusal. Hosts that admit guests return their current verdict (usually
+    /// [`authorize`](Self::authorize) again) so revoking a guest ends its subscriptions at once.
+    /// Default: `Ok` (admitted once, followed until closed, as before 0.5.9).
+    fn recheck(&self, caller: &Caller) -> Result<(), RemoteError> {
+        let _ = caller;
+        Ok(())
+    }
 }
+
+/// How often a subscription is re-checked when no update comes ([`CatalogHost::recheck`]).
+pub const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A ready [`CatalogHost`]: publish the models, and subscribers hear about it.
 #[derive(Clone)]
 pub struct CatalogFeed {
     tx: Arc<watch::Sender<Catalog>>,
     auth: Arc<dyn Authorize>,
+    recheck: bool,
 }
 
 impl CatalogFeed {
     /// A feed whose callers `auth` admits.
     pub fn new(auth: Arc<dyn Authorize>) -> Self {
-        Self { tx: Arc::new(watch::channel(Catalog::default()).0), auth }
+        Self { tx: Arc::new(watch::channel(Catalog::default()).0), auth, recheck: false }
+    }
+
+    /// Re-check subscribers with the authorizer ([`CatalogHost::recheck`]), so one it stops
+    /// admitting (a revoked guest or device) loses its subscription within [`RECHECK_EVERY`].
+    /// Since 0.5.9; off by default.
+    pub fn rechecking(mut self) -> Self {
+        self.recheck = true;
+        self
     }
 
     /// Replaces the models; `rev` goes up by one.
@@ -413,6 +435,10 @@ impl CatalogHost for CatalogFeed {
 
     fn watch(&self, _caller: &Caller) -> Result<watch::Receiver<Catalog>, RemoteError> {
         Ok(self.tx.subscribe())
+    }
+
+    fn recheck(&self, caller: &Caller) -> Result<(), RemoteError> {
+        if self.recheck { self.auth.authorize(caller) } else { Ok(()) }
     }
 }
 
@@ -437,14 +463,24 @@ pub async fn serve(mut ch: Channel, caller: Caller, host: &dyn CatalogHost) -> R
     if !follow {
         return Ok(());
     }
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK_EVERY, RECHECK_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             changed = rx.changed() => {
                 if changed.is_err() {
                     return Ok(());
                 }
+                if let Err(error) = host.recheck(&caller) {
+                    return ch.send_cbor(&ServerMsg::Failed { error }).await;
+                }
                 let now = readable(rx.borrow_and_update().clone());
                 ch.send_cbor(&ServerMsg::Catalog(now)).await?;
+            }
+            _ = tick.tick() => {
+                if let Err(error) = host.recheck(&caller) {
+                    return ch.send_cbor(&ServerMsg::Failed { error }).await;
+                }
             }
             m = ch.rx.recv() => match m {
                 Ok(Some(_)) => {}
@@ -483,6 +519,70 @@ mod tests {
 
     fn anyone() -> Arc<dyn Authorize> {
         Arc::new(|_: &Caller| Ok(()))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rechecking_feed_closes_subscriptions_it_stops_admitting() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let allowed = Arc::new(AtomicBool::new(true));
+        let auth: Arc<dyn Authorize> = {
+            let a = allowed.clone();
+            Arc::new(move |_: &Caller| if a.load(Ordering::SeqCst) { Ok(()) } else { Err(RemoteError::refused("guest-revoked")) })
+        };
+        // On an update: refused before the update is sent.
+        let feed = CatalogFeed::new(auth.clone()).rechecking();
+        feed.publish(vec![CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm)]);
+        let (mut ours, theirs) = memory_pair();
+        let f = feed.clone();
+        tokio::spawn(async move { serve(theirs, Caller::new("guest"), &f).await });
+        let mut seen = Vec::new();
+        let sub = subscribe(&mut ours, None, |c| seen.push(c.rev));
+        let flip = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            allowed.store(false, Ordering::SeqCst);
+            feed.publish(vec![]);
+        };
+        let (r, ()) = tokio::join!(sub, flip);
+        assert_eq!(r.unwrap_err(), RemoteError::refused("guest-revoked"));
+        assert_eq!(seen, [1], "nothing after the revocation");
+
+        // With no update: refused on the next tick.
+        allowed.store(true, Ordering::SeqCst);
+        let (mut ours, theirs) = memory_pair();
+        let f = feed.clone();
+        tokio::spawn(async move { serve(theirs, Caller::new("guest"), &f).await });
+        let mut seen = 0;
+        let sub = subscribe(&mut ours, None, |_| seen += 1);
+        let flip = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            allowed.store(false, Ordering::SeqCst);
+        };
+        let started = tokio::time::Instant::now();
+        let (r, ()) = tokio::join!(sub, flip);
+        assert_eq!(r.unwrap_err(), RemoteError::refused("guest-revoked"));
+        assert_eq!(seen, 1);
+        assert!(started.elapsed() <= RECHECK_EVERY + std::time::Duration::from_millis(100));
+
+        // A feed that doesn't re-check (the default) keeps following, as before 0.5.9.
+        allowed.store(true, Ordering::SeqCst);
+        let feed = CatalogFeed::new(auth);
+        let (mut ours, theirs) = memory_pair();
+        let f = feed.clone();
+        tokio::spawn(async move { serve(theirs, Caller::new("guest"), &f).await });
+        let mut seen = 0;
+        let sub = subscribe(&mut ours, None, |_| seen += 1);
+        let flip = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            allowed.store(false, Ordering::SeqCst);
+            tokio::time::sleep(RECHECK_EVERY * 3).await;
+            feed.publish(vec![]);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        tokio::select! {
+            r = sub => panic!("ended: {r:?}"),
+            () = flip => {}
+        }
+        assert_eq!(seen, 2);
     }
 
     #[tokio::test]

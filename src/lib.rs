@@ -16,12 +16,14 @@
 //! - [`remote`]: protocols between one user's nodes over an app-supplied channel: inference
 //!   (`infer/2` with priorities, queueing, reasoning, tool calls, embeddings, transcription and resume; `infer/1`
 //!   kept for 0.3 nodes), the model catalog, remote tasks (Node companions), and the
-//!   transport-neutral [`remote::pool::Pool`] that fails over and resumes answers across nodes.
-//! - `pool` (feature): the pool over Weirdnet: inference nodes among the user's linked devices.
+//!   transport-neutral [`remote::pool::Pool`] that fails over and resumes answers across nodes,
+//!   and [`remote::share`] links for pools shared with another Weirdnet identity.
+//! - `pool` (feature): the pool over Weirdnet: inference nodes among the user's linked devices,
+//!   or (`pool::connect_shared`) the nodes of a pool another identity shared.
 //! - `jobs` (feature): synced jobs over the weirdnet-sync job log, claimed under majority-vote
 //!   leases and resumed on another device from their last checkpoint.
 //! - `serve` (feature): serve inference and the catalog on a Weirdnet node, checking callers
-//!   against the device roster.
+//!   against the device roster and, opt-in, guests of other identities (`serve::GuestAuth`).
 //!
 //! Nothing here is app-specific: browser tools, panels and storage live in the app.
 //!

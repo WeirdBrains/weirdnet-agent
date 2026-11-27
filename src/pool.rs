@@ -5,6 +5,18 @@
 //!   (active certs in the `weirdnet-sync` roster whose node announces [`INFERENCE_APP`]),
 //!   direct connections before relayed ones.
 //! - [`connect`]: a [`Pool`] over both, presenting this device's certificate.
+//! - [`connect_shared`] (since 0.5.9): a [`Pool`] over a pool owned by *another* Weirdnet
+//!   identity, from its [`PoolShare`] link: the share's nodes in order (no roster discovery),
+//!   dialed by peer id with the share's addresses, presenting this device's guest credential
+//!   ([`encode_credential`]). The owner's nodes admit it by their guest policy
+//!   (`serve::GuestAuth`); a refusal (`not-shared`, `guest-revoked`, `wrong-user` from a node
+//!   that does not take guests) comes back as [`RemoteError::Refused`].
+//!
+//! Dialing another user's node needs nothing special: `weirdnet-net` streams are authenticated by
+//! the peer id (Noise), whoever its user is, and relay circuit addresses
+//! (`.../p2p-circuit/p2p/<id>`) in the share work as for linked devices. The peer ids in the
+//! share are what the connection checks, so take shares only from someone you trust to name the
+//! pool's nodes (as with any link).
 //!
 //! The pool itself ([`crate::remote::pool`]) is transport-neutral.
 
@@ -22,8 +34,9 @@ use weirdnet_net::{Multiaddr, Node, Path, PeerId};
 use weirdnet_sync::Roster;
 
 use crate::net::open_error;
-pub use crate::net::{INFERENCE_APP, channel, decode_cert, encode_cert, stream_limits};
+pub use crate::net::{INFERENCE_APP, Presented, channel, decode_cert, decode_presented, encode_cert, encode_credential, stream_limits};
 pub use crate::remote::pool::{Answer, CatalogWatch, EventSink, Interrupted, Job, NoEvents, NodeSource, Pool, PoolEvent, PoolOptions, Stall};
+pub use crate::remote::share::{PoolShare, ShareError, SharedNode};
 use crate::remote::{Channel, Dialer, RemoteError};
 
 /// Opens agent streams over a `weirdnet-net` node. Node ids are peer ids.
@@ -307,6 +320,60 @@ impl<Q: Message, R: Message> NodeSource for LinkedNodes<Q, R> {
         );
         found.into_iter().map(|(_, p)| p).collect()
     }
+}
+
+/// A [`NetDialer`] for a shared pool: the share's nodes with their addresses as hints. Checks
+/// that every peer id and address parses (an address for another peer is refused).
+pub fn share_dialer<Q: Message, R: Message>(node: Arc<Node<Q, R>>, share: &PoolShare) -> Result<NetDialer<Q, R>, RemoteError> {
+    share.validate().map_err(|e| RemoteError::BadRequest { message: e.to_string() })?;
+    let dialer = NetDialer::new(node);
+    for n in &share.nodes {
+        let bad = |m: String| RemoteError::BadRequest { message: format!("pool share: {m}") };
+        let peer: PeerId = n.peer_id.parse().map_err(|_| bad(format!("{} is not a peer id", n.peer_id)))?;
+        let mut addrs = Vec::new();
+        for a in &n.addrs {
+            let m: Multiaddr = a.parse().map_err(|e| bad(format!("{a}: {e}")))?;
+            // The last `/p2p/<id>` names the peer (earlier ones are relays).
+            let named = m.to_string().rsplit_once("/p2p/").map(|(_, rest)| rest.split('/').next().unwrap_or_default().to_string());
+            if let Some(id) = named
+                && id.parse::<PeerId>().ok() != Some(peer)
+            {
+                return Err(bad(format!("{a} is for {id}, not {peer}")));
+            }
+            addrs.push(m);
+        }
+        if !addrs.is_empty() {
+            dialer.hint(peer, addrs);
+        }
+    }
+    Ok(dialer)
+}
+
+/// A [`Pool`] over a pool another Weirdnet identity shared with this one ([`PoolShare`]): its
+/// nodes in the share's order (failover across them as usual), dialed through `node`, with this
+/// device's guest credential (`user_key`, the public key of this device's user, and `cert`, this
+/// device's certificate) presented with every catalog/1 and infer/2 request. No roster discovery
+/// is done for it. Errors (`BadRequest`) for an invalid or expired share, or a certificate that
+/// is not this node's or not `user_key`'s.
+pub fn connect_shared<Q: Message, R: Message>(
+    node: Arc<Node<Q, R>>,
+    share: &PoolShare,
+    user_key: &weirdnet_net::PublicKey,
+    cert: &NodeCert,
+) -> Result<Pool, RemoteError> {
+    let bad = |m: &str| RemoteError::BadRequest { message: m.to_string() };
+    if share.is_expired(weirdnet_net::now_ms()) {
+        return Err(bad("pool share: expired"));
+    }
+    if cert.peer_id != node.peer_id().to_string() {
+        return Err(bad("the certificate is not this node's"));
+    }
+    if weirdnet_net::user::user_id(user_key) != cert.user_id {
+        return Err(bad("the certificate is not this user's"));
+    }
+    let dialer = share_dialer(node.clone(), share)?;
+    let opts = PoolOptions::default().with_cert(Some(encode_credential(user_key, cert)));
+    Ok(Pool::new(Arc::new(dialer), share.node_ids()).with_options(opts))
 }
 
 /// A [`Pool`] over `node`: inference nodes among the roster's linked devices, presenting
