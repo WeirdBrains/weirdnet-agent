@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Native video, for Bragi V4 and Ymir's video milestones 3 and 4: `ContentPart::VideoUrl { video_url: VideoUrl }` (`{"type": "video_url", "video_url": {"url": "data:video/...;base64,..."}}` in JSON and CBOR, the part vLLM and mistral.rs take) with `ContentPart::video` and `ContentPart::video_bytes`, `VideoUrl::mime_type` and `VideoUrl::data_len`; `Content::check` refuses video that is not a `data:video/` URL.
+- `Modalities::video` (`video` on the wire, left off when false, so entries from older nodes count as not reading video), `Modalities::VIDEO` and `Modalities::with_video`; catalog/1 `inputs.video`. `Catalog::route` and the pool send a request with a video part only to a chat model whose entry reads video, and a refused video request's message ends with the new `catalog::VIDEO_FALLBACK` (send frames instead).
+- `MediaLimits::video_max_seconds`, `video_max_bytes` and `video_frames_per_minute` (each absent when unknown, never defaulted) with `with_video_max_seconds`, `with_video_max_bytes`, `with_video_frames_per_minute`, `video_frame_rate`, `video_frames` and `check_video`; `or` and `tightest` cover them.
+
+### Changed
+
+- `Modalities::lacking` also names video (`"video"`, `"images and video"`, `"audio and video"`, `"images, audio and video"`).
+
 ## [0.5.9] - 2026-11-27
 
 ### Added

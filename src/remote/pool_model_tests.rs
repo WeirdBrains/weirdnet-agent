@@ -283,6 +283,23 @@ async fn cancel_stops_the_node_and_skips_the_fallback() {
 }
 
 #[tokio::test]
+async fn a_choice_without_video_is_rerouted_for_a_clip() {
+    let dialer = MemoryDialer::new();
+    let script = Script::new(false, vec![Step::Text("a dog runs")]);
+    let models = vec![
+        gemma().with_inputs(Modalities::new(true, true)),
+        CatalogModel::new("qwen-vl", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::VISION.with_video(true)),
+    ];
+    node(&dialer, "inference", script.clone(), feed(models), None, false);
+    let model = PoolModel::new(pool(&dialer, names(&["inference"]))).with_model("gemma");
+    let (deltas, mut rx) = sink();
+    let msg = Message::user(vec![ContentPart::text("what happens?"), ContentPart::video("data:video/mp4;base64,AAAAIGZ0eXA=")]);
+    assert_eq!(model.complete(std::slice::from_ref(&msg), &[], &deltas, &CancelToken::new()).await.unwrap().text, "a dog runs");
+    assert_eq!(script.seen.lock().unwrap()[0].model.as_deref(), Some("qwen-vl"), "the pool picked a model that reads video");
+    assert_eq!(drain(&mut rx).2, [ModelNotice::Rerouted { from: "gemma".into(), needs: "video".into() }]);
+}
+
+#[tokio::test]
 async fn a_text_only_choice_is_rerouted_for_images() {
     let dialer = MemoryDialer::new();
     let script = Script::new(false, vec![Step::Text("a cat")]);

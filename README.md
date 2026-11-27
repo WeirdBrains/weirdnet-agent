@@ -29,10 +29,12 @@ records what happened.
   URL that none of its steps fetched; `retain_valid` drops such citations before display.
 - Everything that is stored or synced implements serde.
 - `Message::content` is a `Content`: text, or OpenAI-style parts (`ContentPart::text`,
-  `ContentPart::image` with a `data:image/...` URL, `ContentPart::audio`). Text still goes on the
-  wire as a plain string, so text-only messages reach older peers as before; parts need 0.5 on
-  both ends. `Message::needs()` / `Request::needs()` give the `Modalities` (vision, audio) a model
-  must accept, and `Message::text()` the text alone.
+  `ContentPart::image` with a `data:image/...` URL, `ContentPart::audio`, and since 0.5.10
+  `ContentPart::video` / `ContentPart::video_bytes`, a whole clip as a `data:video/...` URL in a
+  `video_url` part for models that read video natively). Text still goes on the wire as a plain
+  string, so text-only messages reach older peers as before; parts need 0.5 on both ends, video
+  parts 0.5.10. `Message::needs()` / `Request::needs()` give the `Modalities` (vision, audio,
+  video) a model must accept, and `Message::text()` the text alone.
 
   ```rust
   let ask = Message::user(vec![ContentPart::text("What is in this photo?"), ContentPart::image(data_url)]);
@@ -61,11 +63,14 @@ records what happened.
     and, when the node says, where each came from (`origin`: `hub`, `upload` or `train`) and its
     license (`license`), plus its media and request limits when known (`limits`, a `MediaLimits`:
     `max_images`, `image_tokens`, `image_patch`, `image_edge`, `audio_max_seconds`,
-    `audio_tokens_per_minute`, `max_request_bytes`; each absent when unknown, never defaulted, with
-    `image_cost`, `audio_cost`, `tightest` and `or` helpers for sizing and merging).
-    `Catalog::route` picks the model for a request with images or audio. The pool uses it, so such
-    a request never lands on a text-only model: a named model that can't read it, or a pool with
-    no model that can, is a `BadRequest` before any node runs it. Requests with parts skip infer/1
+    `audio_tokens_per_minute`, `max_request_bytes`, and since 0.5.10 `video_max_seconds`,
+    `video_max_bytes` and `video_frames_per_minute`; each absent when unknown, never defaulted,
+    with `image_cost`, `audio_cost`, `video_frames`, `check_video`, `tightest` and `or` helpers
+    for sizing and merging). `Catalog::route` picks the model for a request with images, audio or
+    video (`inputs.video`, absent from older nodes, so their models never get a clip). The pool
+    uses it, so such a request never lands on a model that can't read it: a named model that
+    can't, or a pool with no model that can, is a `BadRequest` before any node runs it, and for
+    video the message ends with `catalog::VIDEO_FALLBACK` (send frames instead). Requests with parts skip infer/1
     nodes. Frames may be up to 32 MiB (8 MiB before 0.5). Speech-to-text models have
     `Purpose::Transcribe` (`transcribe` on the wire, 0.5.8) and are never picked for chat;
     `Catalog::route_transcribe` picks one for a transcription request. Askers before 0.5.8 get the

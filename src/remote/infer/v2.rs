@@ -55,6 +55,13 @@
 //!   before 0.5.8 can't read the request and close the stream; the pool reports that as
 //!   `Unsupported` and tries the next node. The whole request must fit in one stream message
 //!   (32 MiB on Weirdnet), so long soundtracks are sent in pieces.
+//! - **Video** (since 0.5.10): a message may carry a whole clip as a
+//!   [`ContentPart::VideoUrl`](crate::model::ContentPart::VideoUrl) (a `data:video/...` URL, the
+//!   `video_url` part in CBOR as in JSON). It needs [`Modalities::VIDEO`]; the pool routes it with
+//!   [`Catalog::route`](crate::remote::catalog::Catalog::route) only to models whose catalog
+//!   entry says `inputs.video`. A node before 0.5.10 can't read such a request and closes the
+//!   stream, which the pool treats like any dropped node. The clip travels inside the request, so
+//!   it must fit in one stream message with everything else.
 
 use std::pin::pin;
 use std::sync::Arc;
@@ -407,7 +414,7 @@ impl Request {
     }
 
     /// What a model needs to read the inline messages: [`Modalities::TEXT`] unless some carry
-    /// images or audio. Context references and raw prompts are text.
+    /// images, audio or video. Context references and raw prompts are text.
     pub fn needs(&self) -> Modalities {
         self.inline_messages().map(crate::model::needs).unwrap_or(Modalities::TEXT)
     }

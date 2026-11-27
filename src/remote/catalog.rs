@@ -9,10 +9,12 @@
 //! One entry per model with its state, an estimated speed and how many replicas serve it, but
 //! no model-node addresses: apps only ever talk to inference nodes. Messages are CBOR.
 //!
-//! Each entry says which inputs beyond text it takes ([`CatalogModel::inputs`]: images, audio).
-//! Entries from nodes before 0.5 have none, so they count as text-only. [`Catalog::route`] picks
-//! a model for a request that carries images or audio, and the pool uses it so such a request
-//! never lands on a text-only model.
+//! Each entry says which inputs beyond text it takes ([`CatalogModel::inputs`]: images, audio,
+//! and since 0.5.10 whole video clips, `inputs.video`). Entries from nodes before 0.5 have none,
+//! so they count as text-only, and entries without `video` (every node before 0.5.10) count as
+//! not reading video. [`Catalog::route`] picks a model for a request that carries images, audio
+//! or video, and the pool uses it so such a request never lands on a model that can't read it.
+//! A refused video request says the fallback ([`VIDEO_FALLBACK`]): send the clip as frames.
 //!
 //! Entries may also say where the model came from ([`CatalogModel::origin`]) and its license
 //! ([`CatalogModel::license`]); both are left off the wire when unset, so older peers read them.
@@ -41,6 +43,11 @@ use crate::model::Modalities;
 
 /// Stream protocol id.
 pub const PROTOCOL: &str = "/weirdnet-agent/catalog/1";
+
+/// What [`Catalog::route`] tells a client whose video request no model can read natively: the
+/// fallback, sampling the clip into frames (image parts), ends every such `BadRequest` message.
+/// Since 0.5.10.
+pub const VIDEO_FALLBACK: &str = "send the video as frames (image_url parts) instead";
 
 /// What a model is for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,7 +134,8 @@ pub struct CatalogModel {
     /// The model that answers while this one loads, if the pool policy names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standin: Option<String>,
-    /// Inputs it takes beyond text (images, audio). Empty: text only.
+    /// Inputs it takes beyond text (images, audio, video). Empty: text only. `video` is absent
+    /// from nodes before 0.5.10, so their models count as not reading video.
     #[serde(default, skip_serializing_if = "Modalities::is_text")]
     pub inputs: Modalities,
     /// For a LoRA adapter served on a base model: the base's id. Requests name the adapter's own
@@ -270,7 +278,8 @@ impl Catalog {
     /// The model for a request that needs `needed`: text requests keep `model` as is. Otherwise
     /// a named model must take those inputs, and with none named the best chat model that does
     /// is picked (warm, then busy, loading, loadable; then more replicas). A named model the
-    /// catalog does not list is left to the node. `BadRequest` when nothing here can read it.
+    /// catalog does not list is left to the node. `BadRequest` when nothing here can read it; for
+    /// a video part no model reads, the message ends with [`VIDEO_FALLBACK`].
     pub fn route(&self, model: Option<&str>, needed: Modalities) -> Result<Option<String>, RemoteError> {
         if needed.is_text() {
             return Ok(model.map(str::to_string));
@@ -279,7 +288,10 @@ impl Catalog {
             return match self.find(id) {
                 Some(m) if !m.accepts(needed) => {
                     let what = m.inputs.lacking(needed).unwrap_or("this input");
-                    Err(RemoteError::BadRequest { message: format!("model `{id}` does not take {what}; pick one whose catalog entry lists them") })
+                    let hint = if needed.video && !m.inputs.video { format!(", or {VIDEO_FALLBACK}") } else { String::new() };
+                    Err(RemoteError::BadRequest {
+                        message: format!("model `{id}` does not take {what}; pick one whose catalog entry lists them{hint}"),
+                    })
                 }
                 _ => Ok(Some(id.to_string())),
             };
@@ -291,7 +303,8 @@ impl Catalog {
             .map(|m| Some(m.id.clone()))
             .ok_or_else(|| {
                 let what = Modalities::TEXT.lacking(needed).unwrap_or("this input");
-                RemoteError::BadRequest { message: format!("no model in the pool takes {what}") }
+                let hint = if needed.video { format!("; {VIDEO_FALLBACK}") } else { String::new() };
+                RemoteError::BadRequest { message: format!("no model in the pool takes {what}{hint}") }
             })
     }
 
@@ -646,6 +659,84 @@ mod tests {
         let text_only = Catalog::new(1, vec![CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm)]);
         let e = text_only.route(None, Modalities::new(true, true)).unwrap_err();
         assert!(matches!(&e, RemoteError::BadRequest { message } if message == "no model in the pool takes images and audio"), "{e}");
+    }
+
+    #[test]
+    fn route_sends_video_only_to_models_that_read_it() {
+        let both = Modalities::new(true, true);
+        let c = Catalog::new(
+            1,
+            vec![
+                CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(both),
+                CatalogModel::new("qwen-vl-cold", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::VISION.with_video(true)),
+                CatalogModel::new("qwen-vl", Purpose::Chat, ModelState::Busy).with_replicas(2).with_inputs(Modalities::VISION.with_video(true)),
+                CatalogModel::new("omni", Purpose::Chat, ModelState::Loadable).with_inputs(both.with_video(true)),
+                CatalogModel::new("embed", Purpose::Embedding, ModelState::Warm).with_inputs(both.with_video(true)),
+                CatalogModel::new("whisper", Purpose::Transcribe, ModelState::Warm).with_inputs(Modalities::AUDIO.with_video(true)),
+            ],
+        );
+        assert_eq!(c.route(None, Modalities::VIDEO).unwrap().as_deref(), Some("qwen-vl"), "busy before loadable; never embed or transcribe");
+        assert_eq!(c.route(None, Modalities::VIDEO.union(Modalities::AUDIO)).unwrap().as_deref(), Some("omni"));
+        assert_eq!(c.route(None, Modalities::VISION).unwrap().as_deref(), Some("gemma"), "image routing unchanged");
+        assert_eq!(c.route(Some("qwen-vl-cold"), Modalities::VIDEO).unwrap().as_deref(), Some("qwen-vl-cold"));
+        let e = c.route(Some("gemma"), Modalities::VIDEO).unwrap_err();
+        assert!(
+            matches!(&e, RemoteError::BadRequest { message } if message.contains("`gemma` does not take video") && message.ends_with(VIDEO_FALLBACK)),
+            "{e}"
+        );
+        let e = c.route(Some("qwen-vl"), Modalities::VIDEO.union(Modalities::AUDIO)).unwrap_err();
+        assert!(
+            matches!(&e, RemoteError::BadRequest { message } if message.contains("does not take audio") && !message.contains(VIDEO_FALLBACK)),
+            "{e}"
+        );
+        assert_eq!(c.route(Some("not-listed"), Modalities::VIDEO).unwrap().as_deref(), Some("not-listed"), "left to the node");
+        let no_video = Catalog::new(1, vec![CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(both)]);
+        let e = no_video.route(None, Modalities::VIDEO).unwrap_err();
+        assert!(
+            matches!(&e, RemoteError::BadRequest { message } if message == &format!("no model in the pool takes video; {VIDEO_FALLBACK}")),
+            "{e}"
+        );
+        let e = no_video.route(None, Modalities::VISION).unwrap();
+        assert_eq!(e.as_deref(), Some("gemma"));
+    }
+
+    #[test]
+    fn video_input_is_optional_and_old_entries_read_as_no_video() {
+        // A 0.5.9 node's entry (JSON or CBOR) has no `video`: the model does not read video.
+        let old: CatalogModel = serde_json::from_str(r#"{"id":"qwen-vl","state":"warm","inputs":{"vision":true,"audio":true}}"#).unwrap();
+        assert_eq!(old.inputs, Modalities::new(true, true));
+        assert!(!old.accepts(Modalities::VIDEO) && old.accepts(Modalities::VISION));
+        let entry = CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(Modalities::VISION);
+        let j = serde_json::to_value(&entry).unwrap();
+        assert_eq!(j["inputs"], serde_json::json!({"vision": true}), "no video key unless it reads video");
+        // A video entry round-trips, and a video-only one keeps its inputs on the wire.
+        let v = CatalogModel::new("qwen-vl", Purpose::Chat, ModelState::Warm)
+            .with_inputs(Modalities::VISION.with_video(true))
+            .with_limits(MediaLimits::new().with_video_max_seconds(60).with_video_max_bytes(16 << 20).with_video_frames_per_minute(120));
+        assert_eq!(serde_json::to_value(&v).unwrap()["inputs"], serde_json::json!({"vision": true, "video": true}));
+        assert_eq!(crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&v).unwrap()).unwrap(), v);
+        assert_eq!(
+            serde_json::to_value(&v).unwrap()["limits"],
+            serde_json::json!({"video_max_seconds": 60, "video_max_bytes": 16777216, "video_frames_per_minute": 120})
+        );
+        let only = CatalogModel::new("clip", Purpose::Chat, ModelState::Warm).with_inputs(Modalities::VIDEO);
+        assert_eq!(serde_json::to_value(&only).unwrap()["inputs"], serde_json::json!({"video": true}));
+        assert_eq!(crate::remote::from_cbor::<CatalogModel>(&crate::remote::to_cbor(&only).unwrap()).unwrap(), only);
+        // A whole catalog with video entries still reads on a 0.5.9-shaped peer, which keeps the
+        // entry and drops the field.
+        #[derive(Deserialize)]
+        struct OldInputs {
+            #[serde(default)]
+            vision: bool,
+        }
+        #[derive(Deserialize)]
+        struct OldEntry {
+            id: String,
+            #[serde(default)]
+            inputs: Option<OldInputs>,
+        }
+        let seen: OldEntry = crate::remote::from_cbor(&crate::remote::to_cbor(&v).unwrap()).unwrap();
+        assert_eq!((seen.id.as_str(), seen.inputs.map(|i| i.vision)), ("qwen-vl", Some(true)));
     }
 
     #[test]

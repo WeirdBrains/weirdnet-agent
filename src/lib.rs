@@ -12,7 +12,7 @@
 //! - [`budget`]: searches, pages, concurrency and time limits.
 //! - [`trace`]: steps, citations and the cited-step check.
 //! - [`model`]: the model backend trait and chat messages, whose [`Content`] is text or parts
-//!   (text, images, audio) with the [`Modalities`] a model needs to read them.
+//!   (text, images, audio, video) with the [`Modalities`] a model needs to read them.
 //! - [`remote`]: protocols between one user's nodes over an app-supplied channel: inference
 //!   (`infer/2` with priorities, queueing, reasoning, tool calls, embeddings, transcription and resume; `infer/1`
 //!   kept for 0.3 nodes), the model catalog, remote tasks (Node companions), and the
@@ -56,6 +56,7 @@ pub use identity::{AgentId, AgentIdentity, AgentKind};
 pub use limits::MediaLimits;
 pub use model::{
     Content, ContentPart, DeltaSink, ImageUrl, InputAudio, Message, Modalities, ModelBackend, ModelError, ModelNotice, ModelTurn, Role, ToolCall,
+    VideoUrl,
 };
 pub use policy::{
     ActionRequest, AllowRule, ApprovalPrompt, CompanionScope, Decision, DenyReason, Policy, PolicyError, Scope, SharedPolicy, SiteLevel, SkipNotice,

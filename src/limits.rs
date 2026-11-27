@@ -1,5 +1,6 @@
-//! Per-model media and request limits: what a client needs to size images, audio and whole
-//! requests for one model, such as fitting a video clip's frames and soundtrack to it.
+//! Per-model media and request limits: what a client needs to size images, audio, video and
+//! whole requests for one model, such as fitting a video clip's frames and soundtrack to it, or
+//! deciding whether the clip can go whole to a model that reads video natively.
 //!
 //! Every field is absent when the node doesn't know it, never defaulted: a node fills in what it
 //! measured when the model loaded, or what its operator set for that hardware, and leaves the
@@ -43,6 +44,18 @@ pub struct MediaLimits {
     /// the tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_request_bytes: Option<u64>,
+    /// Longest video clip (`video_url` part) in seconds the model takes whole. Since 0.5.10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_max_seconds: Option<u32>,
+    /// Largest video clip in bytes (decoded, not base64) the model takes whole. Since 0.5.10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_max_bytes: Option<u64>,
+    /// Most frames the model reads per minute of a clip sent whole (its backend samples down to
+    /// this): per minute so rates below one frame a second, such as 0.5, stay exact, as with
+    /// [`audio_tokens_per_minute`](Self::audio_tokens_per_minute). See
+    /// [`video_frame_rate`](Self::video_frame_rate) for frames per second. Since 0.5.10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_frames_per_minute: Option<u32>,
 }
 
 impl MediaLimits {
@@ -55,6 +68,9 @@ impl MediaLimits {
         audio_max_seconds: None,
         audio_tokens_per_minute: None,
         max_request_bytes: None,
+        video_max_seconds: None,
+        video_max_bytes: None,
+        video_frames_per_minute: None,
     };
 
     pub fn new() -> Self {
@@ -101,6 +117,45 @@ impl MediaLimits {
     pub fn with_max_request_bytes(mut self, bytes: u64) -> Self {
         self.max_request_bytes = Some(bytes);
         self
+    }
+
+    pub fn with_video_max_seconds(mut self, seconds: u32) -> Self {
+        self.video_max_seconds = Some(seconds);
+        self
+    }
+
+    pub fn with_video_max_bytes(mut self, bytes: u64) -> Self {
+        self.video_max_bytes = Some(bytes);
+        self
+    }
+
+    /// The model reads at most `frames` frames per minute of video (120 for 2 per second).
+    pub fn with_video_frames_per_minute(mut self, frames: u32) -> Self {
+        self.video_frames_per_minute = Some(frames);
+        self
+    }
+
+    /// [`video_frames_per_minute`](Self::video_frames_per_minute) per second (the frame rate).
+    pub fn video_frame_rate(&self) -> Option<f64> {
+        self.video_frames_per_minute.map(|f| f64::from(f) / 60.0)
+    }
+
+    /// The most frames the model reads from `millis` of video sent whole (rounded up), if known.
+    pub fn video_frames(&self, millis: u64) -> Option<u64> {
+        self.video_frames_per_minute.map(|f| (u64::from(f) * millis).div_ceil(60_000))
+    }
+
+    /// Whether a clip of `millis` and `bytes` (decoded) fits the known video limits: `Err` names
+    /// the first it exceeds (`video_max_seconds` or `video_max_bytes`). An unknown limit is not
+    /// checked, so callers that need one should look for it first.
+    pub fn check_video(&self, millis: u64, bytes: u64) -> Result<(), &'static str> {
+        if self.video_max_seconds.is_some_and(|s| millis > u64::from(s) * 1000) {
+            return Err("video_max_seconds");
+        }
+        if self.video_max_bytes.is_some_and(|b| bytes > b) {
+            return Err("video_max_bytes");
+        }
+        Ok(())
     }
 
     /// [`audio_tokens_per_minute`](Self::audio_tokens_per_minute) per second.
@@ -150,11 +205,15 @@ impl MediaLimits {
             audio_max_seconds: self.audio_max_seconds.or(fallback.audio_max_seconds),
             audio_tokens_per_minute: self.audio_tokens_per_minute.or(fallback.audio_tokens_per_minute),
             max_request_bytes: self.max_request_bytes.or(fallback.max_request_bytes),
+            video_max_seconds: self.video_max_seconds.or(fallback.video_max_seconds),
+            video_max_bytes: self.video_max_bytes.or(fallback.video_max_bytes),
+            video_frames_per_minute: self.video_frames_per_minute.or(fallback.video_frames_per_minute),
         }
     }
 
-    /// The stricter of two copies, field by field: fewer images, a smaller edge, shorter audio,
-    /// fewer request bytes, a smaller patch and higher token costs. A field known on one side
+    /// The stricter of two copies, field by field: fewer images, a smaller edge, shorter audio and
+    /// video, fewer request and video bytes, a lower frame rate, a smaller patch and higher token
+    /// costs. A field known on one side
     /// only keeps that side's value, so merging an engine's limits with a model's loses nothing;
     /// a field neither side knows stays absent.
     pub fn tightest(self, other: Self) -> Self {
@@ -172,6 +231,9 @@ impl MediaLimits {
             audio_max_seconds: pick(self.audio_max_seconds, other.audio_max_seconds, Ord::min),
             audio_tokens_per_minute: pick(self.audio_tokens_per_minute, other.audio_tokens_per_minute, Ord::max),
             max_request_bytes: pick(self.max_request_bytes, other.max_request_bytes, Ord::min),
+            video_max_seconds: pick(self.video_max_seconds, other.video_max_seconds, Ord::min),
+            video_max_bytes: pick(self.video_max_bytes, other.video_max_bytes, Ord::min),
+            video_frames_per_minute: pick(self.video_frames_per_minute, other.video_frames_per_minute, Ord::min),
         }
     }
 }
@@ -189,6 +251,9 @@ mod tests {
             .with_audio_max_seconds(30)
             .with_audio_tokens_per_minute(375)
             .with_max_request_bytes(32 << 20)
+            .with_video_max_seconds(60)
+            .with_video_max_bytes(16 << 20)
+            .with_video_frames_per_minute(120)
     }
 
     #[test]
@@ -210,7 +275,18 @@ mod tests {
             assert_eq!(c, l);
         }
         let v = serde_json::to_value(full()).unwrap();
-        for k in ["max_images", "image_tokens", "image_patch", "image_edge", "audio_max_seconds", "audio_tokens_per_minute", "max_request_bytes"] {
+        for k in [
+            "max_images",
+            "image_tokens",
+            "image_patch",
+            "image_edge",
+            "audio_max_seconds",
+            "audio_tokens_per_minute",
+            "max_request_bytes",
+            "video_max_seconds",
+            "video_max_bytes",
+            "video_frames_per_minute",
+        ] {
             assert!(v.get(k).is_some(), "{k}");
         }
     }
@@ -232,6 +308,43 @@ mod tests {
         assert_eq!(audio.audio_cost(60_000), Some(375));
         assert_eq!(audio.audio_cost(1_000), Some(7), "rounded up");
         assert_eq!(MediaLimits::UNKNOWN.audio_cost(1_000), None);
+    }
+
+    #[test]
+    fn video_limits() {
+        let none = MediaLimits::new().with_max_images(4);
+        assert_eq!(serde_json::to_value(none).unwrap(), serde_json::json!({"max_images": 4}), "unknown video fields stay off the wire");
+        assert_eq!((none.video_frame_rate(), none.video_frames(10_000)), (None, None));
+        assert_eq!(none.check_video(u64::MAX, u64::MAX), Ok(()), "nothing known, nothing checked");
+        let v = MediaLimits::new().with_video_max_seconds(30).with_video_max_bytes(8 << 20).with_video_frames_per_minute(30);
+        assert_eq!(
+            serde_json::to_value(v).unwrap(),
+            serde_json::json!({"video_max_seconds": 30, "video_max_bytes": 8388608, "video_frames_per_minute": 30})
+        );
+        assert_eq!(v.video_frame_rate(), Some(0.5));
+        assert_eq!(v.video_frames(10_000), Some(5));
+        assert_eq!(v.video_frames(10_001), Some(6), "rounded up");
+        assert_eq!(v.check_video(30_000, 8 << 20), Ok(()));
+        assert_eq!(v.check_video(30_001, 1), Err("video_max_seconds"));
+        assert_eq!(v.check_video(1_000, (8 << 20) + 1), Err("video_max_bytes"));
+        // What a 0.5.9 peer sends reads as no video limits; what it can't read it ignores.
+        let old: MediaLimits = serde_json::from_str(r#"{"max_images":2,"audio_max_seconds":30}"#).unwrap();
+        assert_eq!(old, MediaLimits::new().with_max_images(2).with_audio_max_seconds(30));
+        let newer: MediaLimits = serde_json::from_str(r#"{"video_max_seconds":5,"video_codecs":["h264"]}"#).unwrap();
+        assert_eq!(newer, MediaLimits::new().with_video_max_seconds(5));
+        // Merging: shorter, smaller and slower wins; one side only keeps its value.
+        let a = MediaLimits::new().with_video_max_seconds(60).with_video_frames_per_minute(120);
+        let b = MediaLimits::new().with_video_max_seconds(20).with_video_max_bytes(4 << 20).with_video_frames_per_minute(60);
+        let t = a.tightest(b);
+        assert_eq!((t.video_max_seconds, t.video_max_bytes, t.video_frames_per_minute), (Some(20), Some(4 << 20), Some(60)));
+        assert_eq!(a.tightest(MediaLimits::UNKNOWN), a);
+        let o = MediaLimits::new().with_video_max_bytes(1 << 20).or(b);
+        assert_eq!(
+            (o.video_max_seconds, o.video_max_bytes, o.video_frames_per_minute),
+            (Some(20), Some(1 << 20), Some(60)),
+            "operator over measured"
+        );
+        assert!(!MediaLimits::new().with_video_frames_per_minute(1).is_unknown());
     }
 
     #[test]

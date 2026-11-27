@@ -15,7 +15,7 @@ use super::v2::{
 use super::{Admission, ClientMsg, InferHost, InferRequest, PROTOCOL as V1, RemoteModel, Route, serve as serve_v1};
 use crate::cancel::CancelToken;
 use crate::model::{ContentPart, DeltaSink, Message, Modalities, ModelBackend, ModelError, ModelTurn, ToolCall};
-use crate::remote::catalog::{self, CatalogFeed, CatalogModel, ModelState, Purpose};
+use crate::remote::catalog::{self, CatalogFeed, CatalogModel, ModelState, Purpose, VIDEO_FALLBACK};
 use crate::remote::pool::{NoEvents, Pool, PoolEvent, PoolOptions, Stall};
 use crate::remote::{Caller, Channel, RemoteError};
 use crate::remote::{FrameTx, MemoryDialer, from_cbor, memory_pair, to_cbor};
@@ -949,4 +949,99 @@ async fn without_a_catalog_the_node_decides_and_infer1_is_skipped() {
     assert_eq!(answer.text, "a cat");
     assert_eq!(script.seen()[0].model, None);
     assert_eq!(v1_hits.load(Ordering::SeqCst), 0, "infer/1 nodes predate content parts");
+}
+
+const MP4: &str = "data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb20=";
+
+fn video_request() -> Request {
+    Request::messages(vec![Message::user(vec![ContentPart::text("what happens?"), ContentPart::video(MP4)])])
+}
+
+/// An inference node with a catalog/1 listing `models`, serving infer/2 with `backend`.
+fn serving_models(dialer: &MemoryDialer, node: &str, backend: Arc<dyn InferBackend>, models: Vec<CatalogModel>) {
+    let host = Arc::new(Host { backend });
+    let feed = CatalogFeed::new(Arc::new(|_: &Caller| Ok(())));
+    feed.publish(models);
+    let admission = Admission::new(1);
+    dialer.route(node, move |ch, protocol| {
+        let (host, admission, feed) = (host.clone(), admission.clone(), feed.clone());
+        tokio::spawn(async move {
+            if protocol == catalog::PROTOCOL {
+                let _ = catalog::serve(ch, Caller::new("phone"), &feed).await;
+            } else if protocol == v2::PROTOCOL {
+                let _ = v2::serve(ch, Caller::new("phone"), host.as_ref(), &admission).await;
+            }
+        });
+    });
+}
+
+fn video_pool_models() -> Vec<CatalogModel> {
+    vec![
+        CatalogModel::new("qwen", Purpose::Chat, ModelState::Warm),
+        CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_inputs(Modalities::new(true, true)),
+        CatalogModel::new("qwen-vl", Purpose::Chat, ModelState::Loadable).with_inputs(Modalities::VISION.with_video(true)),
+    ]
+}
+
+#[tokio::test]
+async fn video_requests_go_only_to_a_model_that_reads_video() {
+    let dialer = MemoryDialer::new();
+    let script = Script::new("qwen-vl@node-b", false, vec![Step::Text("a dog runs")]);
+    serving_models(&dialer, "inference", script.clone(), video_pool_models());
+    let answer = pool(dialer, &["inference"]).infer(video_request(), &NoEvents, &CancelToken::new()).await.unwrap();
+    assert_eq!(answer.text, "a dog runs");
+    let seen = script.seen();
+    assert_eq!(seen[0].model.as_deref(), Some("qwen-vl"), "not the warm image model, not the text default");
+    assert_eq!(seen[0].needs(), Modalities::VIDEO);
+    let parts = seen[0].inline_messages().unwrap()[0].content.parts();
+    assert_eq!(parts, vec![ContentPart::text("what happens?"), ContentPart::video(MP4)], "the clip arrives unchanged over CBOR");
+}
+
+#[tokio::test]
+async fn video_requests_are_refused_with_the_frames_fallback_when_no_model_reads_video() {
+    let dialer = MemoryDialer::new();
+    let script = Script::new("gemma@node-b", false, vec![Step::Text("no")]);
+    let models = video_pool_models().into_iter().filter(|m| !m.inputs.video).collect();
+    serving_models(&dialer, "inference", script.clone(), models);
+    let p = pool(dialer, &["inference"]);
+    let e = p.infer(video_request(), &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(
+        matches!(&e.error, RemoteError::BadRequest { message } if message == &format!("no model in the pool takes video; {VIDEO_FALLBACK}")),
+        "{:?}",
+        e.error
+    );
+    assert!(e.tried.is_empty(), "refused before any node ran it");
+    let e = p.infer(video_request().with_model("gemma"), &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(
+        matches!(&e.error, RemoteError::BadRequest { message } if message.contains("`gemma` does not take video") && message.ends_with(VIDEO_FALLBACK)),
+        "{:?}",
+        e.error
+    );
+    let remote = Request::messages(vec![Message::user(vec![ContentPart::video("https://example.com/clip.mp4")])]);
+    let e = p.infer(remote, &NoEvents, &CancelToken::new()).await.unwrap_err();
+    assert!(matches!(&e.error, RemoteError::BadRequest { message } if message.contains("data:video")), "{:?}", e.error);
+    assert!(script.seen().is_empty());
+    // The fallback works: the same clip as frames goes to the image model.
+    let frames = Request::messages(vec![Message::user(vec![ContentPart::text("what happens?"), ContentPart::image(PNG), ContentPart::image(PNG)])]);
+    p.infer(frames, &NoEvents, &CancelToken::new()).await.unwrap();
+    assert_eq!(script.seen()[0].model.as_deref(), Some("gemma"));
+}
+
+#[tokio::test]
+async fn a_node_that_cannot_read_a_video_request_fails_over() {
+    // Without a catalog the nodes decide. A node before 0.5.10 can't decode the request and
+    // closes the stream; the pool moves on to one that reads it.
+    let dialer = MemoryDialer::new();
+    dialer.route("old", |ch, _| {
+        tokio::spawn(async move {
+            // As a 0.5.9 node: it reads the frame, can't decode the video part and drops the stream.
+            let mut ch = ch;
+            let _ = ch.recv_cbor::<serde_json::Value>().await;
+        });
+    });
+    let script = Script::new("qwen-vl@node-b", false, vec![Step::Text("a dog runs")]);
+    serving(&dialer, "inference", script.clone(), Admission::new(1), None, "phone");
+    let answer = pool(dialer, &["old", "inference"]).infer(video_request(), &NoEvents, &CancelToken::new()).await.unwrap();
+    assert_eq!((answer.text.as_str(), answer.node.as_str()), ("a dog runs", "inference"));
+    assert_eq!(script.seen()[0].inline_messages().unwrap()[0].content.parts()[1], ContentPart::video(MP4));
 }

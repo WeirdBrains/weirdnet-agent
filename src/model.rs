@@ -29,7 +29,7 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
-/// What a message says: plain text, or OpenAI-style parts (text, images, audio).
+/// What a message says: plain text, or OpenAI-style parts (text, images, audio, video).
 ///
 /// Text serializes as a plain string, exactly as `content` did before 0.5, so text-only messages
 /// stay readable by older peers. Parts serialize as a list of `{"type": ...}` objects; peers older
@@ -63,6 +63,14 @@ pub enum ContentPart {
     InputAudio {
         input_audio: InputAudio,
     },
+    /// A whole video clip as a `data:` URL (`data:video/mp4;base64,...`), for models that read
+    /// video natively ([`Modalities::video`]); `{"type": "video_url", "video_url": {"url": ...}}`
+    /// on the wire, the part vLLM and mistral.rs take. Since 0.5.10: peers before it can't read a
+    /// message carrying one, and [`Catalog::route`](crate::remote::catalog::Catalog::route) only
+    /// sends it to models whose catalog entry says `inputs.video`, which older nodes never do.
+    VideoUrl {
+        video_url: VideoUrl,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +80,40 @@ pub struct ImageUrl {
     /// OpenAI's `detail` hint (`auto`, `low`, `high`), passed on as is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// A video clip, inline. Small clips only for now: the whole request must fit in one stream
+/// message (32 MiB on Weirdnet, less behind a bridge's `max_request_bytes`). A reference to a
+/// clip the node fetches over the link (a `weirdnet-net` content root) may be added later as
+/// another optional field, so this stays the place to look.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct VideoUrl {
+    /// A `data:video/...;base64,` URL (see [`Content::check`]); remote URLs are never fetched.
+    pub url: String,
+}
+
+impl VideoUrl {
+    /// The clip's MIME type (`video/mp4`) when the URL is a `data:` URL.
+    pub fn mime_type(&self) -> Option<&str> {
+        let rest = self.url.strip_prefix("data:")?;
+        let end = rest.find([';', ','])?;
+        Some(&rest[..end]).filter(|m| !m.is_empty())
+    }
+
+    /// The clip's size in bytes once decoded, from the base64 length of a `data:...;base64,` URL
+    /// (nothing is decoded), to compare with
+    /// [`MediaLimits::video_max_bytes`](crate::MediaLimits::video_max_bytes). `None` for any
+    /// other URL.
+    pub fn data_len(&self) -> Option<u64> {
+        let (head, data) = self.url.strip_prefix("data:")?.split_once(',')?;
+        if !head.ends_with(";base64") {
+            return None;
+        }
+        let data = data.trim_end();
+        let pad = data.bytes().rev().take_while(|b| *b == b'=').count().min(2);
+        Some((data.len() as u64 * 3 / 4).saturating_sub(pad as u64))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,18 +138,32 @@ impl ContentPart {
         ContentPart::InputAudio { input_audio: InputAudio { data: data.into(), format: format.into() } }
     }
 
+    /// A video part; `url` should be a `data:video/...;base64,` URL (see [`Content::check`]).
+    /// Since 0.5.10.
+    pub fn video(url: impl Into<String>) -> Self {
+        ContentPart::VideoUrl { video_url: VideoUrl { url: url.into() } }
+    }
+
+    /// A video part from the clip's bytes and MIME type (`video/mp4`, `video/webm`), as a
+    /// `data:` URL. Since 0.5.10.
+    pub fn video_bytes(bytes: &[u8], mime_type: &str) -> Self {
+        use base64::Engine as _;
+        Self::video(format!("data:{mime_type};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+    }
+
     /// What a model needs to read this part.
     pub fn needs(&self) -> Modalities {
         match self {
             ContentPart::Text { .. } => Modalities::TEXT,
             ContentPart::ImageUrl { .. } => Modalities::VISION,
             ContentPart::InputAudio { .. } => Modalities::AUDIO,
+            ContentPart::VideoUrl { .. } => Modalities::VIDEO,
         }
     }
 }
 
 impl Content {
-    /// The text: the string, or the text parts joined (images and audio left out).
+    /// The text: the string, or the text parts joined (images, audio and video left out).
     pub fn text(&self) -> std::borrow::Cow<'_, str> {
         match self {
             Content::Text(t) => std::borrow::Cow::Borrowed(t),
@@ -161,8 +217,8 @@ impl Content {
         }
     }
 
-    /// Text-only parts become plain text, the form older peers read. Content with images or
-    /// audio is unchanged.
+    /// Text-only parts become plain text, the form older peers read. Content with images, audio
+    /// or video is unchanged.
     pub fn normalized(self) -> Self {
         match self {
             Content::Parts(p) if p.iter().all(|x| matches!(x, ContentPart::Text { .. })) => Content::Parts(p).into_text().into(),
@@ -170,8 +226,8 @@ impl Content {
         }
     }
 
-    /// Images must be `data:image/...` URLs (nodes never fetch remote URLs) and audio needs a
-    /// format. `Err` says what is wrong, for a 400.
+    /// Images must be `data:image/...` URLs and videos `data:video/...` URLs (nodes never fetch
+    /// remote URLs), and audio needs a format. `Err` says what is wrong, for a 400.
     pub fn check(&self) -> Result<(), String> {
         let Content::Parts(parts) = self else { return Ok(()) };
         for p in parts {
@@ -181,6 +237,9 @@ impl Content {
                 }
                 ContentPart::InputAudio { input_audio } if input_audio.format.is_empty() || input_audio.data.is_empty() => {
                     return Err("input_audio needs data and a format".into());
+                }
+                ContentPart::VideoUrl { video_url } if !video_url.url.starts_with("data:video/") => {
+                    return Err("video_url must be a data:video/... URL; remote video URLs are not fetched".into());
                 }
                 _ => {}
             }
@@ -241,6 +300,10 @@ pub struct Modalities {
     /// Audio (`input_audio` parts).
     #[serde(default, skip_serializing_if = "is_false")]
     pub audio: bool,
+    /// Whole video clips (`video_url` parts), read natively rather than as frames. Since 0.5.10;
+    /// absent (`false`) from older peers, so their models count as not reading video.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub video: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -249,34 +312,49 @@ fn is_false(b: &bool) -> bool {
 
 impl Modalities {
     /// Text only.
-    pub const TEXT: Self = Self { vision: false, audio: false };
-    pub const VISION: Self = Self { vision: true, audio: false };
-    pub const AUDIO: Self = Self { vision: false, audio: true };
+    pub const TEXT: Self = Self { vision: false, audio: false, video: false };
+    pub const VISION: Self = Self { vision: true, audio: false, video: false };
+    pub const AUDIO: Self = Self { vision: false, audio: true, video: false };
+    /// Whole video clips (`video_url` parts). Since 0.5.10.
+    pub const VIDEO: Self = Self { vision: false, audio: false, video: true };
 
+    /// Images and audio; add video with [`with_video`](Self::with_video).
     pub fn new(vision: bool, audio: bool) -> Self {
-        Self { vision, audio }
+        Self { vision, audio, video: false }
+    }
+
+    /// The same with video set to `video`. Since 0.5.10.
+    pub fn with_video(mut self, video: bool) -> Self {
+        self.video = video;
+        self
     }
 
     pub fn is_text(&self) -> bool {
-        !self.vision && !self.audio
+        !self.vision && !self.audio && !self.video
     }
 
     pub fn union(self, other: Self) -> Self {
-        Self { vision: self.vision || other.vision, audio: self.audio || other.audio }
+        Self { vision: self.vision || other.vision, audio: self.audio || other.audio, video: self.video || other.video }
     }
 
     /// A model accepting `self` can read input that needs `needed`.
     pub fn covers(&self, needed: Modalities) -> bool {
-        (self.vision || !needed.vision) && (self.audio || !needed.audio)
+        (self.vision || !needed.vision) && (self.audio || !needed.audio) && (self.video || !needed.video)
     }
 
-    /// What `self` lacks of `needed`, for errors: `"images"`, `"audio"` or `"images and audio"`.
+    /// What `self` lacks of `needed`, for errors: `"images"`, `"audio"`, `"video"`,
+    /// `"images and audio"`, `"images and video"`, `"audio and video"` or
+    /// `"images, audio and video"`.
     pub fn lacking(&self, needed: Modalities) -> Option<&'static str> {
-        match (needed.vision && !self.vision, needed.audio && !self.audio) {
-            (true, true) => Some("images and audio"),
-            (true, false) => Some("images"),
-            (false, true) => Some("audio"),
-            (false, false) => None,
+        match (needed.vision && !self.vision, needed.audio && !self.audio, needed.video && !self.video) {
+            (true, true, true) => Some("images, audio and video"),
+            (true, true, false) => Some("images and audio"),
+            (true, false, true) => Some("images and video"),
+            (false, true, true) => Some("audio and video"),
+            (true, false, false) => Some("images"),
+            (false, true, false) => Some("audio"),
+            (false, false, true) => Some("video"),
+            (false, false, false) => None,
         }
     }
 }
@@ -470,6 +548,78 @@ mod tests {
         assert!(Content::from(vec![ContentPart::image("https://example.com/a.png")]).check().is_err());
         assert!(Content::from(vec![ContentPart::audio("", "wav")]).check().is_err());
         assert!(Content::from("text").check().is_ok());
+    }
+
+    const MP4: &str = "data:video/mp4;base64,AAAAIGZ0eXBpc29t";
+
+    #[test]
+    fn video_parts_round_trip_in_json_and_cbor() {
+        let m = Message::user(vec![ContentPart::text("what happens?"), ContentPart::video(MP4)]);
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(j["content"], serde_json::json!([{"type": "text", "text": "what happens?"}, {"type": "video_url", "video_url": {"url": MP4}}]));
+        assert_eq!(serde_json::from_value::<Message>(j).unwrap(), m);
+        let cbor = crate::remote::to_cbor(&m).unwrap();
+        assert_eq!(crate::remote::from_cbor::<Message>(&cbor).unwrap(), m);
+        assert_eq!(m.needs(), Modalities::VIDEO);
+        assert_eq!(m.text(), "what happens?");
+        let mixed = Message::user(vec![ContentPart::image(PNG), ContentPart::video(MP4), ContentPart::audio("UklGRg==", "wav")]);
+        assert_eq!(mixed.needs(), Modalities::new(true, true).with_video(true));
+        // A part this version doesn't know (a newer one) fails the message, as a video part does
+        // for peers before 0.5.10; routing keeps it away from them.
+        let newer = serde_json::json!({"role": "user", "content": [{"type": "hologram_url", "hologram_url": {"url": "x"}}]});
+        assert!(serde_json::from_value::<Message>(newer).is_err());
+    }
+
+    #[test]
+    fn video_bytes_mime_and_size() {
+        let clip = b"\x00\x00\x00\x20ftypisom-a-tiny-clip";
+        let ContentPart::VideoUrl { video_url } = ContentPart::video_bytes(clip, "video/mp4") else { panic!("a video part") };
+        assert!(video_url.url.starts_with("data:video/mp4;base64,"));
+        assert_eq!(video_url.mime_type(), Some("video/mp4"));
+        assert_eq!(video_url.data_len(), Some(clip.len() as u64));
+        for n in 0..8usize {
+            let ContentPart::VideoUrl { video_url } = ContentPart::video_bytes(&vec![7u8; n], "video/webm") else { unreachable!() };
+            assert_eq!(video_url.data_len(), Some(n as u64), "{n} bytes");
+        }
+        let remote = VideoUrl { url: "https://example.com/a.mp4".into() };
+        assert_eq!((remote.mime_type(), remote.data_len()), (None, None));
+        assert_eq!(VideoUrl { url: "data:video/mp4,raw".into() }.data_len(), None, "not base64");
+        assert!(Content::from(vec![ContentPart::video(MP4)]).check().is_ok());
+        assert!(Content::from(vec![ContentPart::video("https://example.com/a.mp4")]).check().is_err());
+        assert!(Content::from(vec![ContentPart::video("data:image/png;base64,iVBORw0KGgo=")]).check().is_err());
+        let v = Content::from(vec![ContentPart::video(MP4)]);
+        assert_eq!(v.clone().normalized(), v, "video stays parts");
+    }
+
+    #[test]
+    fn video_modality() {
+        let v = Modalities::VIDEO;
+        assert!(!v.is_text() && v.video && !v.vision && !v.audio);
+        assert_eq!(Modalities::new(true, false).with_video(true), Modalities::VISION.union(Modalities::VIDEO));
+        assert!(Modalities::VIDEO.covers(Modalities::VIDEO) && !Modalities::new(true, true).covers(Modalities::VIDEO));
+        assert!(Modalities::VIDEO.covers(Modalities::TEXT) && !Modalities::VIDEO.covers(Modalities::VISION));
+        let all = Modalities::new(true, true).with_video(true);
+        assert_eq!(Modalities::TEXT.lacking(all), Some("images, audio and video"));
+        assert_eq!(Modalities::AUDIO.lacking(all), Some("images and video"));
+        assert_eq!(Modalities::VISION.lacking(all), Some("audio and video"));
+        assert_eq!(Modalities::VIDEO.lacking(all), Some("images and audio"));
+        assert_eq!(Modalities::new(true, true).lacking(all), Some("video"));
+        assert_eq!(all.lacking(all), None);
+        // On the wire: absent unless set, and older peers' records read as no video.
+        assert_eq!(serde_json::to_value(Modalities::new(true, true)).unwrap(), serde_json::json!({"vision": true, "audio": true}));
+        assert_eq!(serde_json::to_value(Modalities::VIDEO).unwrap(), serde_json::json!({"video": true}));
+        assert_eq!(serde_json::from_str::<Modalities>(r#"{"vision":true}"#).unwrap(), Modalities::VISION);
+        let back: Modalities = crate::remote::from_cbor(&crate::remote::to_cbor(&all).unwrap()).unwrap();
+        assert_eq!(back, all);
+        #[derive(Deserialize, PartialEq, Debug)]
+        struct Old {
+            #[serde(default)]
+            vision: bool,
+            #[serde(default)]
+            audio: bool,
+        }
+        let old: Old = crate::remote::from_cbor(&crate::remote::to_cbor(&all).unwrap()).unwrap();
+        assert_eq!(old, Old { vision: true, audio: true }, "a 0.5.9 peer reads the rest and ignores video");
     }
 
     #[test]
