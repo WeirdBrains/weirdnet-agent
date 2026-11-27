@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Speech out (text to speech) for Ymir's audio design and the four target speech models (Qwen3-TTS, Kokoro-82M, VoxCPM2, Fish Audio Drama 3): the new `speech` module with `AudioFormat` (`wav`, `pcm16`, `mp3`, `opus`, `flac`; `as_str`, `parse`, `mime`, `ALL`), `CloneMode` (`audio`, `audio_and_text`, `audio_text_required`), `SpeechProfile` (presets, design, instructions, clone, script speakers, max voices, raw, speed, streaming, languages, formats, sample rate, input/reference/output limits, license; every field absent when unknown) with `tightest`, `narrowed_by` and `covers`, `SpeechNeeds` and `wav_duration_ms`; re-exported at the crate root.
+- `Purpose::Speak` (`speak` on the wire, the same name as weirdnet-model's `hw::Purpose`), `CatalogModel::speech` (an optional `SpeechProfile`, off the wire when absent) with `with_speech`, `speaks` and `speech_covers`, `Catalog::speakers` and `Catalog::route_speak(model, &needs)`. Askers before 0.5.8 never see `speak` entries; askers from 0.5.8 skip them as unreadable.
+- infer/2 `ClientFrame::Speak(SpeakRequest)` (`SpeakInput::{Text, Script, Raw}` with `ScriptTurn`, `Voice::{Preset, Design, Clone}` with the reference clip as a CBOR byte string and `consent`, per-speaker `SpeakerVoice`s, instructions, language, per-mille speed, seed, format, sample rate, stream, priority, cert; builders, `check`, `needs`, `all_voices`, `clones`), answered by `Working` keepalives, one `ServerFrame::SpeechStart { format, sample_rate, channels }`, `ServerFrame::Audio { offset, data }` chunks of at most `MAX_AUDIO_CHUNK` (256 KiB) and `Done`. `MAX_REFERENCE_BYTES` (30 MiB). `Usage::input_chars` and `Usage::audio_ms` (with `Usage::speech`), `Meta::ignored` (with `Meta::with_ignored`), all off the wire when unset.
+- `SpeakBackend`, `AudioStream` (`channel`, `from_file`, `from_pieces`, `next`), `AudioSink`, `SpeechPiece` and `AudioHeader`; `InferHost::open_speak(caller, request)` (default: unavailable). `serve` re-exports them.
+- `Pool::speak` (a whole `Speech`) and `Pool::speak_stream` (a `SpeechStream` once the audio has started: `header`, `next`, `collect`, `meta`, `usage`), failing over across nodes only before `SpeechStart`.
+
 ## [0.5.10] - 2026-11-27
 
 ### Added

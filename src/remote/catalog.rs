@@ -31,6 +31,14 @@
 //! entries out for askers that don't say they skip what they can't read; [`query`] and
 //! [`subscribe`] say so, and from 0.5.8 an entry this version can't read (a purpose from a newer
 //! version, say) is skipped instead of failing the whole catalog.
+//!
+//! Since 0.5.11 a model may speak ([`Purpose::Speak`], `speak` on the wire): text in, audio out
+//! (infer/2 `Speak`), with its [`SpeechProfile`] ([`CatalogModel::speech`]: preset voices,
+//! design, cloning, scripts, formats and limits; merged across nodes with
+//! [`SpeechProfile::tightest`]). It is never picked for chat or transcription;
+//! [`Catalog::route_speak`] picks one whose profile covers a request's [`SpeechNeeds`]. Askers
+//! before 0.5.8 never see `speak` entries ([`serve`] leaves them out, as for `transcribe`), and
+//! askers from 0.5.8 to 0.5.10 skip them as entries they can't read.
 
 use std::sync::Arc;
 
@@ -40,6 +48,7 @@ use tokio::sync::watch;
 use super::{Authorize, Caller, Channel, RemoteError, bytes};
 use crate::limits::MediaLimits;
 use crate::model::Modalities;
+use crate::speech::{SpeechNeeds, SpeechProfile};
 
 /// Stream protocol id.
 pub const PROTOCOL: &str = "/weirdnet-agent/catalog/1";
@@ -60,16 +69,20 @@ pub enum Purpose {
     /// Speech to text: audio in, its transcript out (infer/2 `Transcribe`). Never picked as a
     /// chat model. Since 0.5.8; older peers don't see these entries (see the module docs).
     Transcribe,
+    /// Text to speech: text in, audio out (infer/2 `Speak`). Never picked as a chat model or a
+    /// transcriber. Since 0.5.11; older peers don't see these entries (see the module docs).
+    Speak,
 }
 
 impl Purpose {
-    /// The name on the wire and in settings: `chat`, `embedding` or `transcribe` (the same names
+    /// The name on the wire and in settings: `chat`, `embedding`, `transcribe` or `speak` (the same names
     /// as [weirdnet-model](https://crates.io/crates/weirdnet-model)'s `hw::Purpose`).
     pub fn as_str(&self) -> &'static str {
         match self {
             Purpose::Chat => "chat",
             Purpose::Embedding => "embedding",
             Purpose::Transcribe => "transcribe",
+            Purpose::Speak => "speak",
         }
     }
 
@@ -79,11 +92,13 @@ impl Purpose {
             "chat" => Some(Purpose::Chat),
             "embedding" => Some(Purpose::Embedding),
             "transcribe" => Some(Purpose::Transcribe),
+            "speak" => Some(Purpose::Speak),
             _ => None,
         }
     }
 
-    /// Known to peers before 0.5.8.
+    /// Known to peers before 0.5.8 (which can't skip an entry they can't read; peers from 0.5.8
+    /// skip `speak` entries themselves).
     fn before_transcribe(self) -> bool {
         matches!(self, Purpose::Chat | Purpose::Embedding)
     }
@@ -156,6 +171,12 @@ pub struct CatalogModel {
     /// Left off the wire when none is known; absent in catalogs from 0.5.6 and earlier.
     #[serde(default, skip_serializing_if = "MediaLimits::is_unknown")]
     pub limits: MediaLimits,
+    /// For a speaking model ([`Purpose::Speak`]): what it does, takes and allows, merged across
+    /// the nodes that serve it ([`SpeechProfile::tightest`]). Absent when no node reported one
+    /// (the model then serves only plain text in its default voice and format), and in catalogs
+    /// from 0.5.10 and earlier. Since 0.5.11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<SpeechProfile>,
 }
 
 /// [`CatalogModel::origin`]: downloaded from a Hub.
@@ -215,6 +236,12 @@ impl CatalogModel {
         self
     }
 
+    /// Its speech profile (for a [`Purpose::Speak`] model).
+    pub fn with_speech(mut self, speech: SpeechProfile) -> Self {
+        self.speech = Some(speech);
+        self
+    }
+
     /// Whether it is a LoRA adapter on another model.
     pub fn is_adapter(&self) -> bool {
         self.base.is_some()
@@ -228,6 +255,23 @@ impl CatalogModel {
     /// A speech-to-text model ([`Purpose::Transcribe`]).
     pub fn transcribes(&self) -> bool {
         self.purpose == Purpose::Transcribe
+    }
+
+    /// A text-to-speech model ([`Purpose::Speak`]).
+    pub fn speaks(&self) -> bool {
+        self.purpose == Purpose::Speak
+    }
+
+    /// Whether this speaking model's profile covers `needs` (no profile: only the plainest
+    /// request). `Err` says what it lacks; `Err` too when it doesn't speak.
+    pub fn speech_covers(&self, needs: &SpeechNeeds) -> Result<(), String> {
+        if !self.speaks() {
+            return Err("does not speak (text to speech)".into());
+        }
+        match &self.speech {
+            Some(p) => p.covers(needs),
+            None => SpeechProfile::default().covers(needs),
+        }
     }
 }
 
@@ -328,6 +372,52 @@ impl Catalog {
             .ok_or_else(|| RemoteError::BadRequest { message: "no model in the pool transcribes audio".into() })
     }
 
+    /// The model for a speech request (infer/2 `Speak`, since 0.5.11): a named model must be a
+    /// speaking model ([`Purpose::Speak`]) whose profile covers `needs`
+    /// ([`SpeakRequest::needs`](crate::remote::infer::v2::SpeakRequest::needs)), and with none
+    /// named the best speaker that covers them is picked (warm, then busy, loading, loadable;
+    /// then more replicas). A named model the catalog does not list is left to the node.
+    /// `BadRequest` names the model and what it lacks, or says no model in the pool speaks, or
+    /// what each speaker lacks.
+    pub fn route_speak(&self, model: Option<&str>, needs: &SpeechNeeds) -> Result<String, RemoteError> {
+        if let Some(id) = model {
+            return match self.find(id) {
+                Some(m) if !m.speaks() => Err(RemoteError::BadRequest {
+                    message: format!("model `{id}` does not speak (text to speech); pick one whose catalog purpose is `speak`"),
+                }),
+                Some(m) => match m.speech_covers(needs) {
+                    Ok(()) => Ok(id.to_string()),
+                    Err(lack) => Err(RemoteError::BadRequest { message: format!("model `{id}` {lack}") }),
+                },
+                None => Ok(id.to_string()),
+            };
+        }
+        let mut lacking = Vec::new();
+        let best = self
+            .speakers()
+            .filter(|m| match m.speech_covers(needs) {
+                Ok(()) => true,
+                Err(lack) => {
+                    lacking.push(format!("`{}` {lack}", m.id));
+                    false
+                }
+            })
+            .min_by_key(|m| (rank(m.state), std::cmp::Reverse(m.replicas)))
+            .map(|m| m.id.clone());
+        best.ok_or_else(|| RemoteError::BadRequest {
+            message: if lacking.is_empty() {
+                "no model in the pool speaks (text to speech)".into()
+            } else {
+                format!("no speaker in the pool covers this request: {}", lacking.join("; "))
+            },
+        })
+    }
+
+    /// The text-to-speech models (since 0.5.11).
+    pub fn speakers(&self) -> impl Iterator<Item = &CatalogModel> {
+        self.models.iter().filter(|m| m.speaks())
+    }
+
     /// The speech-to-text models.
     pub fn transcribers(&self) -> impl Iterator<Item = &CatalogModel> {
         self.models.iter().filter(|m| m.transcribes())
@@ -341,7 +431,7 @@ impl Catalog {
 
 /// Asking node to inference node. [`query`] and [`subscribe`] also say that the asker skips
 /// entries it can't read (a field older nodes ignore); a node leaves entries peers before 0.5.8
-/// can't read ([`Purpose::Transcribe`]) out of its answer to a message without it, so an app that
+/// can't read ([`Purpose::Transcribe`], [`Purpose::Speak`]) out of its answer to a message without it, so an app that
 /// sends this type itself sees no transcription models.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -458,7 +548,7 @@ impl CatalogHost for CatalogFeed {
 /// Serve one catalog/1 stream. `caller` is the transport-authenticated peer; the certificate the
 /// request presents is attached when the transport gave none, and the host authorizes it first.
 /// An asker that doesn't say it skips entries it can't read (one before 0.5.8) gets the catalog
-/// without [`Purpose::Transcribe`] entries, which it could not decode.
+/// without [`Purpose::Transcribe`] and [`Purpose::Speak`] entries, which it could not decode.
 pub async fn serve(mut ch: Channel, caller: Caller, host: &dyn CatalogHost) -> Result<(), RemoteError> {
     let (cert, follow, skips_unknown) = match ch.recv_cbor::<Ask>().await? {
         Some(Ask::Query { cert, skips_unknown }) => (cert, false, skips_unknown),
@@ -1023,5 +1113,129 @@ mod tests {
         // Unset, the flag stays off the wire: the bytes are what 0.5.7 sends.
         let quiet = Ask::Query { cert: None, skips_unknown: false };
         assert_eq!(crate::remote::to_cbor(&quiet).unwrap(), crate::remote::to_cbor(&ClientMsg::Query { cert: None }).unwrap());
+    }
+
+    fn speak_catalog() -> Catalog {
+        use crate::speech::{AudioFormat, CloneMode};
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        Catalog::new(
+            4,
+            vec![
+                CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm),
+                CatalogModel::new("voxtral", Purpose::Transcribe, ModelState::Warm),
+                CatalogModel::new("kokoro", Purpose::Speak, ModelState::Warm).with_speech(
+                    SpeechProfile::new()
+                        .with_presets(s(&["af_heart", "am_adam"]))
+                        .with_raw(true)
+                        .with_speed(true)
+                        .with_formats(vec![AudioFormat::Wav, AudioFormat::Pcm16]),
+                ),
+                CatalogModel::new("qwen3-tts-base", Purpose::Speak, ModelState::Loadable)
+                    .with_speech(SpeechProfile::new().with_clone(CloneMode::AudioAndText).with_formats(vec![AudioFormat::Wav, AudioFormat::Mp3])),
+                CatalogModel::new("qwen3-tts-base-2", Purpose::Speak, ModelState::Warm)
+                    .with_replicas(2)
+                    .with_speech(SpeechProfile::new().with_clone(CloneMode::AudioAndText).with_formats(vec![AudioFormat::Wav])),
+                CatalogModel::new("plain-tts", Purpose::Speak, ModelState::Busy),
+            ],
+        )
+    }
+
+    #[test]
+    fn speak_purpose_names_match_weirdnet_model() {
+        assert_eq!((Purpose::Speak.as_str(), Purpose::parse("speak")), ("speak", Some(Purpose::Speak)));
+        assert_eq!(serde_json::to_value(Purpose::Speak).unwrap(), serde_json::json!("speak"));
+        let m = CatalogModel::new("kokoro", Purpose::Speak, ModelState::Warm);
+        assert!(m.speaks() && !m.transcribes() && !m.accepts(Modalities::TEXT));
+        assert!(CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).speech_covers(&SpeechNeeds::new()).is_err());
+        // No profile: only the plainest request.
+        assert!(m.speech_covers(&SpeechNeeds::new().with_input_chars(4)).is_ok());
+        assert!(m.speech_covers(&SpeechNeeds::new().with_preset("af_heart")).is_err());
+    }
+
+    #[test]
+    fn route_speak_picks_a_speaker_that_covers_the_request() {
+        use crate::speech::AudioFormat;
+        let c = speak_catalog();
+        assert_eq!(c.speakers().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["kokoro", "qwen3-tts-base", "qwen3-tts-base-2", "plain-tts"]);
+        let plain = SpeechNeeds::new().with_input_chars(12);
+        assert_eq!(c.route_speak(None, &plain).unwrap(), "qwen3-tts-base-2", "warm, then more replicas");
+        assert_eq!(c.route_speak(None, &SpeechNeeds::new().with_preset("am_adam")).unwrap(), "kokoro");
+        assert_eq!(c.route_speak(None, &SpeechNeeds::new().with_clone(false)).unwrap(), "qwen3-tts-base-2");
+        assert_eq!(c.route_speak(None, &SpeechNeeds::new().with_clone(true).with_format(AudioFormat::Mp3)).unwrap(), "qwen3-tts-base");
+        // Named: must speak and cover; unknown names are the node's call.
+        assert_eq!(c.route_speak(Some("kokoro"), &SpeechNeeds::new().with_raw()).unwrap(), "kokoro");
+        assert_eq!(c.route_speak(Some("elsewhere"), &plain).unwrap(), "elsewhere");
+        let bad = |model: Option<&str>, needs: SpeechNeeds, what: &[&str]| {
+            let e = c.route_speak(model, &needs).unwrap_err();
+            let RemoteError::BadRequest { message } = &e else { panic!("{e:?}") };
+            for w in what {
+                assert!(message.contains(w), "{message}");
+            }
+        };
+        bad(Some("gemma"), plain.clone(), &["`gemma`", "does not speak", "`speak`"]);
+        bad(Some("voxtral"), plain.clone(), &["`voxtral`", "does not speak"]);
+        bad(Some("kokoro"), SpeechNeeds::new().with_preset("alloy"), &["model `kokoro`", "`alloy`", "af_heart, am_adam"]);
+        bad(Some("kokoro"), SpeechNeeds::new().with_clone(true), &["model `kokoro` does not clone voices"]);
+        bad(None, SpeechNeeds::new().with_design(), &["no speaker in the pool", "`kokoro` does not design", "`plain-tts` does not design"]);
+        let none = Catalog::new(1, vec![CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm)]);
+        assert_eq!(
+            none.route_speak(None, &plain).unwrap_err(),
+            RemoteError::BadRequest { message: "no model in the pool speaks (text to speech)".into() }
+        );
+        // Chat and transcription routing never pick a speaker.
+        let only = Catalog::new(1, vec![CatalogModel::new("kokoro", Purpose::Speak, ModelState::Warm).with_inputs(Modalities::AUDIO)]);
+        assert!(only.route(None, Modalities::AUDIO).is_err());
+        assert!(only.route_transcribe(None).is_err());
+    }
+
+    #[test]
+    fn speakers_round_trip_and_older_readers_skip_them() {
+        let c = speak_catalog();
+        assert_eq!(crate::remote::from_cbor::<Catalog>(&crate::remote::to_cbor(&c).unwrap()).unwrap(), c);
+        assert_eq!(serde_json::from_str::<Catalog>(&serde_json::to_string(&c).unwrap()).unwrap(), c);
+        // Without a profile, nothing of it on the wire.
+        let v = serde_json::to_value(CatalogModel::new("plain-tts", Purpose::Speak, ModelState::Busy)).unwrap();
+        assert!(v.get("speech").is_none(), "{v}");
+        // A 0.5.8-0.5.10 reader doesn't know `speak`: the entry fails to decode, so it skips it
+        // (as this version skips the unknown `diarize`), and reads the rest.
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        #[allow(dead_code)]
+        enum Purpose0510 {
+            Chat,
+            Embedding,
+            Transcribe,
+        }
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        struct Entry0510 {
+            id: String,
+            purpose: Purpose0510,
+        }
+        let entries = serde_json::to_value(&c).unwrap()["models"].as_array().unwrap().clone();
+        let readable: Vec<String> = entries.into_iter().filter_map(|e| serde_json::from_value::<Entry0510>(e).ok()).map(|e| e.id).collect();
+        assert_eq!(readable, ["gemma", "voxtral"]);
+        assert_eq!(c.for_older().models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gemma"]);
+    }
+
+    #[tokio::test]
+    async fn older_askers_get_the_catalog_without_speakers() {
+        let feed = CatalogFeed::new(anyone());
+        feed.publish(speak_catalog().models);
+        assert!(crate::remote::from_cbor::<OldServerMsg>(&crate::remote::to_cbor(&ServerMsg::Catalog(feed.current())).unwrap()).is_err());
+        let (mut ours, theirs) = memory_pair();
+        let f = feed.clone();
+        tokio::spawn(async move { serve(theirs, Caller::new("phone"), &f).await });
+        ours.send_cbor(&ClientMsg::Query { cert: None }).await.unwrap();
+        let bytes = ours.rx.recv().await.unwrap().unwrap();
+        let OldServerMsg::Catalog(old) = crate::remote::from_cbor::<OldServerMsg>(&bytes).unwrap();
+        assert_eq!(old.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gemma"]);
+        // This version's askers get the speakers with their profiles.
+        let (mut ours, theirs) = memory_pair();
+        let f = feed.clone();
+        tokio::spawn(async move { serve(theirs, Caller::new("phone"), &f).await });
+        let c = query(&mut ours, None).await.unwrap();
+        assert_eq!(c.speakers().count(), 4);
+        assert_eq!(c.find("kokoro").unwrap().speech, speak_catalog().find("kokoro").unwrap().speech);
     }
 }

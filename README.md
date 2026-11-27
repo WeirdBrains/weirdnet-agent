@@ -52,10 +52,18 @@ records what happened.
     `language`, `prompt` and `timestamps`) is served through `InferHost::open_transcribe` and a
     `TranscribeBackend`; the node answers `Accepted`, `Working` keepalives, one `Transcript`
     (`text`, `language`, `duration_ms`, timed `Segment`s) and `Done` with usage.
+    Speech out (0.5.11): a `SpeakRequest` (text, a multi-speaker script or raw engine input; a
+    preset, designed or cloned `Voice`, the clone's reference clip as raw bytes with `consent`;
+    instructions, language, speed, format, stream) is served through `InferHost::open_speak` and
+    a `SpeakBackend` returning an `AudioStream`; the node answers `Accepted`, `Working`
+    keepalives, one `SpeechStart` (format, rate, channels), `Audio` chunks of at most 256 KiB and
+    `Done` with usage (characters, audio milliseconds). What each speaking model does is its
+    `speech::SpeechProfile`.
   - `remote::pool::Pool`: tries nodes in order, cancels a stalled stream (max(15 s, 3× the token
     gap), under the transport's 30 s resume window) and resumes it elsewhere without repeating
     text; continues a stopped answer from a caller's `assistant_prefix` (`Request::continuing`)
     on nodes that resume; embeddings, transcription (`Pool::transcribe`, a `Transcription`),
+    speech out (`Pool::speak`, `Pool::speak_stream`; failover only before the audio starts),
     background jobs and catalog subscribe with failover. `RemoteModel` is a
     `ModelBackend` over it, with a local fallback before any token has streamed.
   - `remote::catalog` (`/weirdnet-agent/catalog/1`): which models the nodes have, their state and
@@ -75,6 +83,8 @@ records what happened.
     `Purpose::Transcribe` (`transcribe` on the wire, 0.5.8) and are never picked for chat;
     `Catalog::route_transcribe` picks one for a transcription request. Askers before 0.5.8 get the
     catalog without them, and from 0.5.8 an entry a peer can't read is skipped, not fatal.
+    Speaking models have `Purpose::Speak` (`speak`, 0.5.11) and a `SpeechProfile`
+    (`CatalogModel::speech`); `Catalog::route_speak` picks one whose profile covers a request.
   - `remote::pool_model`: a model cloud such as [Ymir](https://github.com/WeirdBrains/ymir) as one
     model. `PoolModel` is a `ModelBackend` over the pool with resume on: a node that dies mid-answer
     continues on another (`ModelNotice::Continued`), a chosen model that can't read a turn's images

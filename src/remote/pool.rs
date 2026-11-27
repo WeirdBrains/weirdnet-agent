@@ -27,8 +27,9 @@
 //!   catalog to ask, the nodes decide (model nodes refuse inputs their model can't read). Such
 //!   requests never go to infer/1 nodes, which predate content parts.
 //!
-//! The pool also queries and subscribes to the [`catalog`], sends embeddings and transcription
-//! requests ([`Pool::transcribe`]), and runs [`Job`]s in the background. It has no networking of its own: a [`Dialer`] opens
+//! The pool also queries and subscribes to the [`catalog`], sends embeddings, transcription
+//! requests ([`Pool::transcribe`]) and speech requests ([`Pool::speak`], [`Pool::speak_stream`],
+//! failing over only before the audio starts), and runs [`Job`]s in the background. It has no networking of its own: a [`Dialer`] opens
 //! channels and a [`NodeSource`] says which nodes to try, in order. The `pool` cargo feature
 //! provides both over `weirdnet-net` (`crate::pool`).
 
@@ -44,12 +45,14 @@ use tokio::task::JoinHandle;
 
 use super::catalog::{self, Catalog};
 use super::infer::v2::{
-    self, ClientFrame, EmbedRequest, Finish, Meta, Prefix, Request, Resume, ServerFrame, TranscribeRequest, Transcript, Usage, chars,
+    self, AudioHeader, ClientFrame, EmbedRequest, Finish, Meta, Prefix, Request, Resume, ServerFrame, SpeakRequest, TranscribeRequest, Transcript,
+    Usage, chars,
 };
 use super::infer::{self as v1, DEFAULT_ACCEPT_TIMEOUT};
 use super::{Channel, Dialer, RemoteError, request_id};
 use crate::cancel::CancelToken;
 use crate::model::{DeltaSink, ModelTurn, ToolCall};
+use crate::speech::AudioFormat;
 
 /// Resumes per answer when [`PoolOptions::resume`] is on.
 pub const DEFAULT_MAX_RESUMES: u32 = 2;
@@ -330,6 +333,151 @@ pub struct Transcription {
     pub meta: Meta,
     /// Token counts, when the serving node reports them.
     pub usage: Option<Usage>,
+}
+
+/// Speech and where it came from ([`Pool::speak`], since 0.5.11).
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct Speech {
+    /// The whole file, in `format`.
+    pub audio: Vec<u8>,
+    pub format: AudioFormat,
+    /// Hz, when the node said.
+    pub sample_rate: Option<u32>,
+    /// When the node said.
+    pub channels: Option<u16>,
+    /// The backend that served it, as its node named it in `Accepted`.
+    pub model: String,
+    pub node: String,
+    pub meta: Meta,
+    /// Characters spoken, audio milliseconds and engine tokens, as the node reports them.
+    pub usage: Option<Usage>,
+}
+
+/// Speech arriving from the node that started it ([`Pool::speak_stream`], since 0.5.11): the
+/// header is known, the audio comes with [`next`](Self::next). A failure from here on is final
+/// (no other node is tried). Dropping it mid-way closes the stream, which stops the node.
+pub struct SpeechStream {
+    ch: Channel,
+    id: String,
+    header: AudioHeader,
+    model: String,
+    node: String,
+    offset: u64,
+    wait: Duration,
+    cancel: CancelToken,
+    end: Option<(Meta, Option<Usage>)>,
+}
+
+impl std::fmt::Debug for SpeechStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpeechStream")
+            .field("id", &self.id)
+            .field("header", &self.header)
+            .field("model", &self.model)
+            .field("node", &self.node)
+            .field("offset", &self.offset)
+            .finish()
+    }
+}
+
+impl SpeechStream {
+    /// The format, and the rate and channels when known.
+    pub fn header(&self) -> AudioHeader {
+        self.header
+    }
+
+    /// The backend serving it, as its node named it in `Accepted`.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    /// Bytes of audio received so far.
+    pub fn received(&self) -> u64 {
+        self.offset
+    }
+
+    /// The `Done` metadata, once [`next`](Self::next) has returned `Ok(None)`.
+    pub fn meta(&self) -> Option<&Meta> {
+        self.end.as_ref().map(|(m, _)| m)
+    }
+
+    /// The usage, once [`next`](Self::next) has returned `Ok(None)` (if the node reported it).
+    pub fn usage(&self) -> Option<Usage> {
+        self.end.as_ref().and_then(|(_, u)| *u)
+    }
+
+    /// The next piece of audio, in order; `Ok(None)` when the speech is complete. `Err` when the
+    /// node fails, the stream drops or stalls (no frame within the pool's stall cap), or the
+    /// cancel token fires (the node is told to stop).
+    pub async fn next(&mut self) -> Result<Option<Vec<u8>>, RemoteError> {
+        if self.end.is_some() {
+            return Ok(None);
+        }
+        loop {
+            let next = tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    let _ = self.ch.send_cbor(&ClientFrame::Cancel { id: self.id.clone() }).await;
+                    return Err(RemoteError::Cancelled);
+                }
+                r = tokio::time::timeout(self.wait, self.ch.recv_cbor::<ServerFrame>()) => r,
+            };
+            let frame = match next {
+                Err(_) => {
+                    let _ = self.ch.send_cbor(&ClientFrame::Cancel { id: self.id.clone() }).await;
+                    return Err(RemoteError::Stalled { ms: self.wait.as_millis() as u64 });
+                }
+                Ok(Err(e)) => return Err(e),
+                Ok(Ok(None)) => return Err(RemoteError::Closed),
+                Ok(Ok(Some(f))) => f,
+            };
+            if frame.id() != self.id {
+                continue;
+            }
+            match frame {
+                ServerFrame::Audio { offset, data, .. } if offset == self.offset => {
+                    self.offset += data.len() as u64;
+                    if !data.is_empty() {
+                        return Ok(Some(data));
+                    }
+                }
+                ServerFrame::Audio { offset, .. } => {
+                    return Err(RemoteError::protocol(format!("audio at byte {offset} where byte {} was next", self.offset)));
+                }
+                ServerFrame::Working { .. } | ServerFrame::Usage { .. } => {}
+                ServerFrame::Done { finish, .. } => {
+                    self.end = Some((finish.meta, finish.usage));
+                    return Ok(None);
+                }
+                ServerFrame::Failed { error, .. } => return Err(error),
+                ServerFrame::Cancelled { .. } => return Err(RemoteError::Failed { message: "cancelled by the node".into() }),
+                other => return Err(RemoteError::protocol(format!("unexpected frame {other:?}"))),
+            }
+        }
+    }
+
+    /// Reads the rest and returns the whole [`Speech`].
+    pub async fn collect(mut self) -> Result<Speech, RemoteError> {
+        let mut audio = Vec::new();
+        while let Some(piece) = self.next().await? {
+            audio.extend_from_slice(&piece);
+        }
+        let (meta, usage) = self.end.take().unwrap_or_default();
+        Ok(Speech {
+            audio,
+            format: self.header.format,
+            sample_rate: self.header.sample_rate,
+            channels: self.header.channels,
+            model: std::mem::take(&mut self.model),
+            node: std::mem::take(&mut self.node),
+            meta,
+            usage,
+        })
+    }
 }
 
 enum Fail {
@@ -827,6 +975,106 @@ impl Pool {
                     out.meta = finish.meta;
                     out.usage = finish.usage;
                     return Ok(out);
+                }
+                ServerFrame::Failed { error, .. } => return Err(Fail::Error(error)),
+                ServerFrame::Cancelled { .. } => return Err(Fail::Error(RemoteError::Failed { message: "cancelled by the node".into() })),
+                other => return Err(Fail::Error(RemoteError::protocol(format!("unexpected frame {other:?}")))),
+            }
+        }
+    }
+
+    /// Speech for one request, whole ([`speak_stream`](Self::speak_stream) read to the end).
+    /// Since 0.5.11.
+    pub async fn speak(&self, request: SpeakRequest, cancel: &CancelToken) -> Result<Speech, RemoteError> {
+        self.speak_stream(request, cancel).await?.collect().await
+    }
+
+    /// Starts speech for one request on the first node that serves it (infer/2, nodes from
+    /// 0.5.11) and returns once that node has sent `SpeechStart`, with the audio to read from the
+    /// [`SpeechStream`]. Before `SpeechStart` node errors fail over to the next node (an
+    /// unreachable or busy node, one with no speaker that covers the request (`Unsupported`), one
+    /// too old to read the request, which closes the stream); a `BadRequest` (empty input, a
+    /// clone without consent, a named model that doesn't speak or lacks what the request needs)
+    /// comes back at once. After `SpeechStart` nothing fails over: another node would start the
+    /// speech again with another voice draw. With no model named, each node picks its own
+    /// speaker; to pick one across the pool first, see
+    /// [`Catalog::route_speak`](super::catalog::Catalog::route_speak). Since 0.5.11.
+    pub async fn speak_stream(&self, mut request: SpeakRequest, cancel: &CancelToken) -> Result<SpeechStream, RemoteError> {
+        request.check()?;
+        if request.cert.is_none() {
+            request.cert.clone_from(&self.opts.cert);
+        }
+        let mut tried = Vec::new();
+        for node in self.nodes.nodes().await {
+            match self.speak_on(&node, &request, cancel).await {
+                Ok(s) => return Ok(s),
+                Err(Fail::Cancelled) => return Err(RemoteError::Cancelled),
+                Err(Fail::Error(e) | Fail::Unsupported(e)) if e.is_request_error() => return Err(e),
+                Err(Fail::Error(e) | Fail::Unsupported(e)) => tried.push(e),
+                Err(Fail::NoResume) => {}
+            }
+            request.id = request_id();
+        }
+        Err(reported(tried.iter(), "no inference node to run on"))
+    }
+
+    async fn speak_on(&self, node: &str, request: &SpeakRequest, cancel: &CancelToken) -> Result<SpeechStream, Fail> {
+        let mut ch = self.open(node, v2::PROTOCOL, cancel).await?;
+        let id = request.id.clone();
+        ch.send_cbor(&ClientFrame::Speak(request.clone())).await.map_err(Fail::Error)?;
+        let mut model = String::new();
+        let mut accepted = false;
+        loop {
+            // Between `Accepted` and `SpeechStart` only `Working` keepalives arrive (every
+            // `QUEUE_KEEPALIVE`), so the wait after acceptance is the stall cap.
+            let wait = if accepted { self.opts.stall.max } else { self.opts.accept_timeout };
+            let next = tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = ch.send_cbor(&ClientFrame::Cancel { id }).await;
+                    return Err(Fail::Cancelled);
+                }
+                r = tokio::time::timeout(wait, ch.recv_cbor::<ServerFrame>()) => r,
+            };
+            let frame = match next {
+                Err(_) => {
+                    let _ = ch.send_cbor(&ClientFrame::Cancel { id }).await;
+                    return Err(Fail::Error(if accepted { RemoteError::Stalled { ms: wait.as_millis() as u64 } } else { RemoteError::Timeout }));
+                }
+                Ok(Err(e)) => return Err(Fail::Error(e)),
+                // A node before 0.5.11 can't read the request and closes the stream unanswered.
+                Ok(Ok(None)) if !accepted => {
+                    return Err(Fail::Unsupported(RemoteError::Unsupported {
+                        message: format!("node {node} closed the stream without answering; it may predate speech out (weirdnet-agent 0.5.11)"),
+                    }));
+                }
+                Ok(Ok(None)) => return Err(Fail::Error(RemoteError::Closed)),
+                Ok(Ok(Some(f))) => f,
+            };
+            if frame.id() != id {
+                continue;
+            }
+            match frame {
+                ServerFrame::Queued { .. } if !accepted => {}
+                ServerFrame::Accepted { model: m, .. } if !accepted => {
+                    accepted = true;
+                    model = m;
+                }
+                ServerFrame::Working { .. } if accepted => {}
+                ServerFrame::SpeechStart { format, sample_rate, channels, .. } if accepted => {
+                    let mut header = AudioHeader::new(format);
+                    header.sample_rate = sample_rate;
+                    header.channels = channels;
+                    return Ok(SpeechStream {
+                        ch,
+                        id,
+                        header,
+                        model,
+                        node: node.to_string(),
+                        offset: 0,
+                        wait: self.opts.stall.max,
+                        cancel: cancel.clone(),
+                        end: None,
+                    });
                 }
                 ServerFrame::Failed { error, .. } => return Err(Fail::Error(error)),
                 ServerFrame::Cancelled { .. } => return Err(Fail::Error(RemoteError::Failed { message: "cancelled by the node".into() })),

@@ -34,6 +34,12 @@
 //! is exactly the roster check: guests are refused (`wrong-user`), as by every host before
 //! 0.5.9. A guest credential naming the host's own user always goes to the roster.
 //!
+//! Every infer/2 request kind (chat, embeddings, transcription and, since 0.5.11, speech out) goes
+//! through the same [`InferHost::authorize`], so a guest needs [`GuestScope::Infer`] for each;
+//! what a guest may do beyond that (which speakers, whether it may clone a voice) is the host's
+//! call in [`InferHost::open_speak`], which sees the caller and the whole request
+//! ([`SharedPoolAuth::identify`] tells a guest from the user's own devices).
+//!
 //! Revocation is live: the policy runs on every infer/1 and infer/2 request (one per stream) and
 //! every catalog query; a catalog subscription is re-checked before each update and every few
 //! seconds when the host re-checks ([`CatalogHost::recheck`], [`CatalogFeed::rechecking`]), and
@@ -49,7 +55,9 @@ use weirdnet_sync::{CallerCheck, Roster};
 
 pub use crate::net::{INFERENCE_APP, Presented, channel, decode_cert, decode_presented, encode_cert, encode_credential, stream_limits};
 pub use crate::remote::catalog::{CatalogFeed, CatalogHost};
-pub use crate::remote::infer::v2::{EmbedBackend, InferBackend, ModelAdapter, Output, TranscribeBackend};
+pub use crate::remote::infer::v2::{
+    AudioHeader, AudioSink, AudioStream, EmbedBackend, InferBackend, ModelAdapter, Output, SpeakBackend, SpeechPiece, TranscribeBackend,
+};
 pub use crate::remote::infer::{Admission, InferHost};
 pub use crate::remote::task::TaskHost;
 use crate::remote::{Admitted, Authorize, Caller, RemoteError, catalog, infer, task};
@@ -123,7 +131,7 @@ impl Authorize for RosterAuth {
 pub enum GuestScope {
     /// catalog/1: query or subscribe.
     Catalog,
-    /// infer/1 and infer/2: chat, embeddings, transcription.
+    /// infer/1 and infer/2: chat, embeddings, transcription, speech out.
     Infer,
 }
 

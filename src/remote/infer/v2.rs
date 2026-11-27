@@ -2,12 +2,13 @@
 //!
 //! ```text
 //! asking node                               serving node
-//!   Infer(Request) | Embed(EmbedRequest) | Transcribe(TranscribeRequest) ->
+//!   Infer(Request) | Embed(EmbedRequest) | Transcribe(TranscribeRequest) | Speak(SpeakRequest) ->
 //!                                           <- Queued { position } ...   (while waiting for a slot)
 //!                                           <- Accepted { model, attempt, resume }
 //!                                           <- Delta { offset, text } | Reasoning { offset, text }
 //!                                           <- Meta { meta }             (early_meta askers)
 //!                                           <- ToolCall { index, call } | Usage | Embedding | Transcript ...
+//!                                           <- Working ... | SpeechStart { format, .. } | Audio { offset, data } ...
 //!   Cancel { id } ->                        (any time)
 //!                                           <- Done { finish } | Failed { error } | Cancelled
 //! ```
@@ -62,6 +63,22 @@
 //!   entry says `inputs.video`. A node before 0.5.10 can't read such a request and closes the
 //!   stream, which the pool treats like any dropped node. The clip travels inside the request, so
 //!   it must fit in one stream message with everything else.
+//! - **Speech out** (since 0.5.11): a [`SpeakRequest`] carries text ([`SpeakInput::Text`]), a
+//!   multi-speaker script ([`SpeakInput::Script`]) or raw engine input ([`SpeakInput::Raw`]),
+//!   an optional [`Voice`] (a preset, a designed voice, or a voice cloned from a reference clip
+//!   sent as a CBOR byte string, with `consent`), per-speaker voices, instructions, language,
+//!   speed (per mille), seed, format ([`AudioFormat`]), sample rate and whether to stream. The
+//!   node answers `Accepted`, `Working` every [`QUEUE_KEEPALIVE`] until the audio starts, one
+//!   `SpeechStart` (format, and sample rate and channels when known), `Audio` frames of at most
+//!   [`MAX_AUDIO_CHUNK`] bytes in order (each with its byte offset), then `Done` with usage
+//!   ([`Usage::input_chars`], [`Usage::audio_ms`]) and metadata ([`Meta::ignored`] names fields
+//!   the model doesn't use). [`SpeakRequest::check`] refuses empty input, a clone without
+//!   consent and a reference over [`MAX_REFERENCE_BYTES`] before the host opens a backend
+//!   ([`InferHost::open_speak`], a [`SpeakBackend`] returning an [`AudioStream`]); an inference
+//!   node routes with [`Catalog::route_speak`](crate::remote::catalog::Catalog::route_speak).
+//!   The pool fails over to another node only before `SpeechStart`: once audio has left, a
+//!   failure is final (another node would speak with another voice draw). Nodes before 0.5.11
+//!   can't read the request and close the stream, which the pool treats as `Unsupported`.
 
 use std::pin::pin;
 use std::sync::Arc;
@@ -80,6 +97,7 @@ use crate::cancel::CancelToken;
 use crate::model::{DeltaSink, Message, Modalities, ModelBackend, Role, ToolCall};
 use crate::remote::{Caller, Channel, RemoteError, bytes, request_id};
 use crate::session::AgentEvent;
+use crate::speech::{AudioFormat, SpeechNeeds};
 use crate::tool::ToolSpec;
 
 /// Stream protocol id.
@@ -594,6 +612,351 @@ impl Segment {
     }
 }
 
+/// Largest reference clip a [`SpeakRequest`] may carry (30 MiB), checked before any backend
+/// opens. A model's [`SpeechProfile::max_reference_bytes`](crate::speech::SpeechProfile::max_reference_bytes) may be smaller. Since 0.5.11.
+pub const MAX_REFERENCE_BYTES: usize = 30 << 20;
+
+/// Largest [`ServerFrame::Audio`] chunk (256 KiB); the server splits bigger pieces. Since 0.5.11.
+pub const MAX_AUDIO_CHUNK: usize = 256 << 10;
+
+/// What a [`SpeakRequest`] speaks (since 0.5.11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SpeakInput {
+    /// Plain text in the model's chat-free speech template.
+    Text(String),
+    /// A multi-speaker script, turn by turn (needs [`SpeechProfile::script_speakers`](crate::speech::SpeechProfile::script_speakers) above the
+    /// highest speaker number).
+    Script(Vec<ScriptTurn>),
+    /// Passed to the engine as is, with no template (phonemes for Kokoro, say; needs
+    /// [`SpeechProfile::raw`](crate::speech::SpeechProfile::raw)).
+    Raw(String),
+}
+
+impl Default for SpeakInput {
+    fn default() -> Self {
+        SpeakInput::Text(String::new())
+    }
+}
+
+impl SpeakInput {
+    /// Characters (Unicode scalar values) of input: the text, or the turns' text.
+    pub fn chars(&self) -> u64 {
+        match self {
+            SpeakInput::Text(t) | SpeakInput::Raw(t) => chars(t),
+            SpeakInput::Script(turns) => turns.iter().map(|t| chars(&t.text)).sum(),
+        }
+    }
+
+    /// The highest speaker number of a script; `None` for text or raw input.
+    pub fn highest_speaker(&self) -> Option<u8> {
+        match self {
+            SpeakInput::Script(turns) => turns.iter().map(|t| t.speaker).max(),
+            _ => None,
+        }
+    }
+}
+
+/// One turn of a multi-speaker script (since 0.5.11).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ScriptTurn {
+    /// The speaker number, from 0.
+    pub speaker: u8,
+    pub text: String,
+}
+
+impl ScriptTurn {
+    pub fn new(speaker: u8, text: impl Into<String>) -> Self {
+        Self { speaker, text: text.into() }
+    }
+}
+
+/// The voice to speak with (since 0.5.11). Absent from a request: the model's default voice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Voice {
+    /// One of the model's preset voices ([`SpeechProfile::presets`](crate::speech::SpeechProfile::presets)); any other name is refused
+    /// with the list, never mapped to another voice.
+    Preset { name: String },
+    /// A voice designed from a description (needs [`SpeechProfile::design`](crate::speech::SpeechProfile::design)).
+    Design { description: String },
+    /// A voice cloned from a reference clip (needs [`SpeechProfile::clone`](crate::speech::SpeechProfile::clone)). The clip travels
+    /// as a CBOR byte string, lives in memory for this request only and is never stored or
+    /// logged. `consent` must be true: the asker confirms the voice is theirs or they have
+    /// permission to use it.
+    Clone {
+        #[serde(with = "bytes")]
+        audio: Vec<u8>,
+        /// The clip's format, as in an `input_audio` part: `wav`, `mp3`, `flac`, ...
+        format: String,
+        /// What the clip says, for models that use it ([`CloneMode`](crate::speech::CloneMode)).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default)]
+        consent: bool,
+    },
+}
+
+impl Voice {
+    pub fn preset(name: impl Into<String>) -> Self {
+        Voice::Preset { name: name.into() }
+    }
+
+    pub fn design(description: impl Into<String>) -> Self {
+        Voice::Design { description: description.into() }
+    }
+
+    /// A cloned voice from `audio` in `format`, with `consent` as the asker gave it.
+    pub fn clone_from(audio: Vec<u8>, format: impl Into<String>, text: Option<String>, consent: bool) -> Self {
+        Voice::Clone { audio, format: format.into(), text, consent }
+    }
+}
+
+/// The voice for one speaker of a script (since 0.5.11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SpeakerVoice {
+    pub speaker: u8,
+    pub voice: Voice,
+}
+
+impl SpeakerVoice {
+    pub fn new(speaker: u8, voice: Voice) -> Self {
+        Self { speaker, voice }
+    }
+}
+
+/// Text to speech (infer/2 `Speak`, since 0.5.11): text or a script, the voice, and how the audio
+/// should come back. Nothing in it is cached, logged or stored by a node.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SpeakRequest {
+    pub id: String,
+    /// A speaking model by the serving app's id (`None`: the node picks a speaker that covers
+    /// the request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub input: SpeakInput,
+    /// The voice (for a script: the voice of speakers without their own). `None`: the model's
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<Voice>,
+    /// Per-speaker voices for a script, at most one per speaker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voices: Vec<SpeakerVoice>,
+    /// Style or emotion for the chosen voice (needs [`SpeechProfile::instructions`](crate::speech::SpeechProfile::instructions)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// The language (ISO 639-1 or one of the engine's codes in [`SpeechProfile::languages`](crate::speech::SpeechProfile::languages)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Speaking speed in per mille of the model's pace (1000 = as is, 1200 = 20 % faster; needs
+    /// [`SpeechProfile::speed`](crate::speech::SpeechProfile::speed)). Per mille so the request keeps `Eq`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    /// The output format (`None`: the model's default, the first of
+    /// [`SpeechProfile::formats`](crate::speech::SpeechProfile::formats)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<AudioFormat>,
+    /// The output sample rate in Hz (`None`: the model's own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    /// Send audio as the engine makes it (when it streams); otherwise the finished file comes in
+    /// chunks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
+    #[serde(default)]
+    pub priority: Priority,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "bytes::opt")]
+    pub cert: Option<Vec<u8>>,
+}
+
+impl SpeakRequest {
+    /// Speak `text` in the model's default voice.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::with_input(SpeakInput::Text(text.into()))
+    }
+
+    /// Speak a multi-speaker script.
+    pub fn script(turns: Vec<ScriptTurn>) -> Self {
+        Self::with_input(SpeakInput::Script(turns))
+    }
+
+    /// Pass `input` to the engine with no template ([`SpeakInput::Raw`]).
+    pub fn raw(input: impl Into<String>) -> Self {
+        Self::with_input(SpeakInput::Raw(input.into()))
+    }
+
+    /// A request for `input` with a fresh id.
+    pub fn with_input(input: SpeakInput) -> Self {
+        Self { id: request_id(), input, ..Default::default() }
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_voice(mut self, voice: Voice) -> Self {
+        self.voice = Some(voice);
+        self
+    }
+
+    /// The voice of one speaker of a script (replacing one set before for that speaker).
+    pub fn with_speaker_voice(mut self, speaker: u8, voice: Voice) -> Self {
+        self.voices.retain(|v| v.speaker != speaker);
+        self.voices.push(SpeakerVoice::new(speaker, voice));
+        self
+    }
+
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
+        self
+    }
+
+    pub fn with_language(mut self, language: impl Into<String>) -> Self {
+        self.language = Some(language.into());
+        self
+    }
+
+    /// Speed in per mille of the model's pace (1000 = as is).
+    pub fn with_speed(mut self, per_mille: u32) -> Self {
+        self.speed = Some(per_mille);
+        self
+    }
+
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    pub fn with_format(mut self, format: AudioFormat) -> Self {
+        self.format = Some(format);
+        self
+    }
+
+    pub fn with_sample_rate(mut self, hz: u32) -> Self {
+        self.sample_rate = Some(hz);
+        self
+    }
+
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_cert(mut self, cert: Vec<u8>) -> Self {
+        self.cert = Some(cert);
+        self
+    }
+
+    /// Every voice in the request: the voice, then the per-speaker voices.
+    pub fn all_voices(&self) -> impl Iterator<Item = &Voice> {
+        self.voice.iter().chain(self.voices.iter().map(|v| &v.voice))
+    }
+
+    /// Whether any voice is cloned from a reference clip.
+    pub fn clones(&self) -> bool {
+        self.all_voices().any(|v| matches!(v, Voice::Clone { .. }))
+    }
+
+    /// `BadRequest` for a request no model could serve: empty input (or an empty script turn),
+    /// per-speaker voices without a script or twice for one speaker, an empty preset name,
+    /// description or reference format, a reference clip that is empty, over
+    /// [`MAX_REFERENCE_BYTES`] or without `consent`, or a speed of 0. The server checks this
+    /// before the host opens a backend; the backend then checks the request against its profile.
+    pub fn check(&self) -> Result<(), RemoteError> {
+        let bad = |m: &str| Err(RemoteError::BadRequest { message: m.to_string() });
+        match &self.input {
+            SpeakInput::Text(t) | SpeakInput::Raw(t) if t.trim().is_empty() => return bad("a speech request needs text to speak"),
+            SpeakInput::Script(turns) if turns.is_empty() => return bad("a speech script needs at least one turn"),
+            SpeakInput::Script(turns) if turns.iter().any(|t| t.text.trim().is_empty()) => return bad("every turn of a speech script needs text"),
+            _ => {}
+        }
+        if !self.voices.is_empty() && !matches!(self.input, SpeakInput::Script(_)) {
+            return bad("per-speaker voices need a script input");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(v) = self.voices.iter().find(|v| !seen.insert(v.speaker)) {
+            return Err(RemoteError::BadRequest { message: format!("speaker {} has more than one voice", v.speaker) });
+        }
+        for voice in self.all_voices() {
+            match voice {
+                Voice::Preset { name } if name.trim().is_empty() => return bad("a preset voice needs a name"),
+                Voice::Design { description } if description.trim().is_empty() => return bad("a designed voice needs a description"),
+                Voice::Clone { audio, format, consent, .. } => {
+                    if !consent {
+                        return bad("cloning a voice needs consent: confirm the voice is yours or you have permission to use it");
+                    }
+                    if audio.is_empty() {
+                        return bad("cloning a voice needs a reference clip");
+                    }
+                    if audio.len() > MAX_REFERENCE_BYTES {
+                        return Err(RemoteError::BadRequest {
+                            message: format!("the reference clip is {} bytes, over the {MAX_REFERENCE_BYTES}-byte limit", audio.len()),
+                        });
+                    }
+                    if format.trim().is_empty() {
+                        return bad("a reference clip needs its format (wav, mp3, ...)");
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.speed == Some(0) {
+            return bad("a speaking speed of 0 is not a speed (1000 is the model's pace)");
+        }
+        if self.sample_rate == Some(0) {
+            return bad("a sample rate of 0 Hz is not a rate");
+        }
+        Ok(())
+    }
+
+    /// What the request needs from a model's [`SpeechProfile`](crate::speech::SpeechProfile), for
+    /// [`SpeechProfile::covers`](crate::speech::SpeechProfile::covers) and
+    /// [`Catalog::route_speak`](crate::remote::catalog::Catalog::route_speak). A reference
+    /// clip's length is read from WAV headers; other formats leave it to the engine.
+    pub fn needs(&self) -> SpeechNeeds {
+        let mut n = SpeechNeeds::new().with_input_chars(self.input.chars().min(u64::from(u32::MAX)) as u32);
+        for voice in self.all_voices() {
+            n = match voice {
+                Voice::Preset { name } => n.with_preset(name.clone()),
+                Voice::Design { .. } => n.with_design(),
+                Voice::Clone { audio, format, text, .. } => {
+                    let ms = if format.eq_ignore_ascii_case("wav") { crate::speech::wav_duration_ms(audio) } else { None };
+                    n.with_clone(text.as_deref().is_some_and(|t| !t.trim().is_empty())).with_reference(audio.len() as u64, ms)
+                }
+            };
+        }
+        if let Some(h) = self.input.highest_speaker() {
+            n = n.with_script(h);
+        }
+        if matches!(self.input, SpeakInput::Raw(_)) {
+            n = n.with_raw();
+        }
+        if self.instructions.as_deref().is_some_and(|i| !i.trim().is_empty()) {
+            n = n.with_instructions();
+        }
+        if self.speed.is_some_and(|s| s != 1000) {
+            n = n.with_speed();
+        }
+        if let Some(f) = self.format {
+            n = n.with_format(f);
+        }
+        n
+    }
+}
+
 /// Token counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -605,11 +968,26 @@ pub struct Usage {
     /// Prompt tokens served from a prefix cache.
     #[serde(default)]
     pub cached_tokens: u64,
+    /// Characters of input spoken ([`SpeakRequest`]). Since 0.5.11; left off the wire when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub input_chars: u64,
+    /// Milliseconds of audio produced ([`SpeakRequest`]). Since 0.5.11; left off the wire when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub audio_ms: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Usage {
     pub fn new(prompt_tokens: u64, completion_tokens: u64) -> Self {
         Self { prompt_tokens, completion_tokens, ..Default::default() }
+    }
+
+    /// Speech usage: characters spoken and milliseconds of audio made (since 0.5.11).
+    pub fn speech(input_chars: u64, audio_ms: u64) -> Self {
+        Self { input_chars, audio_ms, ..Default::default() }
     }
 }
 
@@ -662,6 +1040,23 @@ pub struct Meta {
     pub resumes: Vec<Resume>,
     #[serde(default)]
     pub timings: Timings,
+    /// Request fields the model received but does not use (such as `reference_text` for a model
+    /// that clones from the clip alone), named rather than refused because sending them is
+    /// harmless. Since 0.5.11; left off the wire when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<String>,
+}
+
+impl Meta {
+    /// Names a request field the model received but does not use ([`Meta::ignored`]), once.
+    /// Since 0.5.11.
+    pub fn with_ignored(mut self, field: impl Into<String>) -> Self {
+        let field = field.into();
+        if !self.ignored.contains(&field) {
+            self.ignored.push(field);
+        }
+        self
+    }
 }
 
 /// How a turn ended.
@@ -701,6 +1096,8 @@ pub enum ClientFrame {
     },
     /// Speech to text (since 0.5.8).
     Transcribe(TranscribeRequest),
+    /// Text to speech (since 0.5.11).
+    Speak(SpeakRequest),
 }
 
 /// Serving node to asking node.
@@ -771,6 +1168,24 @@ pub enum ServerFrame {
     Working {
         id: String,
     },
+    /// The audio of a [`SpeakRequest`] begins (since 0.5.11): sent once, before the first
+    /// `Audio`. The sample rate and channel count are absent when the engine did not say.
+    SpeechStart {
+        id: String,
+        format: AudioFormat,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sample_rate: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channels: Option<u16>,
+    },
+    /// A piece of the audio (since 0.5.11): at most [`MAX_AUDIO_CHUNK`] bytes, at byte `offset`
+    /// of the whole file, in order.
+    Audio {
+        id: String,
+        offset: u64,
+        #[serde(with = "bytes")]
+        data: Vec<u8>,
+    },
 }
 
 impl ServerFrame {
@@ -787,6 +1202,8 @@ impl ServerFrame {
             | ServerFrame::Meta { id, .. }
             | ServerFrame::Transcript { id, .. }
             | ServerFrame::Working { id }
+            | ServerFrame::SpeechStart { id, .. }
+            | ServerFrame::Audio { id, .. }
             | ServerFrame::Done { id, .. }
             | ServerFrame::Failed { id, .. }
             | ServerFrame::Cancelled { id } => id,
@@ -908,6 +1325,146 @@ pub trait TranscribeBackend: Send + Sync {
     }
 }
 
+/// How a speech answer's audio is encoded: the format, and the sample rate and channel count when
+/// the engine says (since 0.5.11). Becomes [`ServerFrame::SpeechStart`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct AudioHeader {
+    pub format: AudioFormat,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u16>,
+}
+
+impl AudioHeader {
+    pub fn new(format: AudioFormat) -> Self {
+        Self { format, ..Default::default() }
+    }
+
+    pub fn with_sample_rate(mut self, hz: u32) -> Self {
+        self.sample_rate = Some(hz);
+        self
+    }
+
+    pub fn with_channels(mut self, channels: u16) -> Self {
+        self.channels = Some(channels);
+        self
+    }
+}
+
+/// One piece of an [`AudioStream`] (since 0.5.11): the header once, then audio, with usage and
+/// metadata whenever the backend knows them.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum SpeechPiece {
+    /// The audio begins; must come once, before any `Audio`.
+    Start(AudioHeader),
+    /// The next bytes of the file, any size (the server splits them into frames of at most
+    /// [`MAX_AUDIO_CHUNK`]).
+    Audio(Vec<u8>),
+    /// Counts so far (the last one wins); the server fills in
+    /// [`Usage::input_chars`] when the backend leaves it at 0.
+    Usage(Usage),
+    /// Metadata for `Done`: [`Meta::ignored`] fields are added, `served_by` and `revision` kept
+    /// when set.
+    Meta(Meta),
+}
+
+/// What a [`SpeakBackend`] returns (since 0.5.11): the speech as it is made. A backend either
+/// hands over a finished file ([`AudioStream::from_file`]) or streams through the
+/// [`AudioSink`] of [`AudioStream::channel`] from a task it spawns (which should stop when
+/// `cancel` fires or [`AudioSink::is_closed`]). An `Err` piece fails the request.
+#[derive(Debug)]
+pub struct AudioStream {
+    rx: mpsc::Receiver<Result<SpeechPiece, RemoteError>>,
+}
+
+/// The sending end of an [`AudioStream`] (since 0.5.11). Every send fails with `Cancelled` once
+/// the stream is gone (the asker cancelled or went away).
+#[derive(Debug, Clone)]
+pub struct AudioSink {
+    tx: mpsc::Sender<Result<SpeechPiece, RemoteError>>,
+}
+
+impl AudioStream {
+    /// A stream and its sink, holding up to `buffer` pieces (at least 1) before a send waits.
+    pub fn channel(buffer: usize) -> (AudioSink, AudioStream) {
+        let (tx, rx) = mpsc::channel(buffer.max(1));
+        (AudioSink { tx }, AudioStream { rx })
+    }
+
+    /// A finished file: the header, the audio and, if known, usage.
+    pub fn from_file(header: AudioHeader, audio: Vec<u8>, usage: Option<Usage>) -> Self {
+        let mut pieces = vec![Ok(SpeechPiece::Start(header)), Ok(SpeechPiece::Audio(audio))];
+        pieces.extend(usage.map(|u| Ok(SpeechPiece::Usage(u))));
+        Self::from_pieces(pieces)
+    }
+
+    /// A stream of these pieces, in order.
+    pub fn from_pieces(pieces: Vec<Result<SpeechPiece, RemoteError>>) -> Self {
+        let (tx, rx) = mpsc::channel(pieces.len().max(1));
+        for p in pieces {
+            let _ = tx.try_send(p);
+        }
+        Self { rx }
+    }
+
+    /// The next piece; `None` at the end.
+    pub async fn next(&mut self) -> Option<Result<SpeechPiece, RemoteError>> {
+        self.rx.recv().await
+    }
+}
+
+impl AudioSink {
+    async fn send(&self, piece: Result<SpeechPiece, RemoteError>) -> Result<(), RemoteError> {
+        self.tx.send(piece).await.map_err(|_| RemoteError::Cancelled)
+    }
+
+    /// The audio begins (once, first).
+    pub async fn start(&self, header: AudioHeader) -> Result<(), RemoteError> {
+        self.send(Ok(SpeechPiece::Start(header))).await
+    }
+
+    /// More audio; empty pieces are skipped.
+    pub async fn audio(&self, data: Vec<u8>) -> Result<(), RemoteError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.send(Ok(SpeechPiece::Audio(data))).await
+    }
+
+    pub async fn usage(&self, usage: Usage) -> Result<(), RemoteError> {
+        self.send(Ok(SpeechPiece::Usage(usage))).await
+    }
+
+    pub async fn meta(&self, meta: Meta) -> Result<(), RemoteError> {
+        self.send(Ok(SpeechPiece::Meta(meta))).await
+    }
+
+    /// Fails the request with `error` (after any audio already sent).
+    pub async fn fail(&self, error: RemoteError) -> Result<(), RemoteError> {
+        self.send(Err(error)).await
+    }
+
+    /// The stream is gone: stop making audio.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+}
+
+/// What serves speech out (since 0.5.11): a speaking model on this node, or an inference node's
+/// routing to one.
+#[async_trait]
+pub trait SpeakBackend: Send + Sync {
+    fn name(&self) -> String;
+
+    /// The speech for `request` (already [`check`](SpeakRequest::check)ed). Return
+    /// `Unsupported` when this model can't serve the request but another node's copy might (a
+    /// different engine), `BadRequest` naming what the model lacks when none could
+    /// ([`SpeechProfile::covers`](crate::speech::SpeechProfile::covers)). Poll `cancel`; the
+    /// server keeps the asker's stream alive with `Working` until the stream starts.
+    async fn speak(&self, request: &SpeakRequest, cancel: &CancelToken) -> Result<AudioStream, RemoteError>;
+}
+
 /// An [`InferBackend`] over a [`ModelBackend`]: inline messages and tools only, no resume;
 /// sampling settings, seed and response format are left to the model's defaults.
 pub struct ModelAdapter {
@@ -1012,6 +1569,7 @@ pub async fn serve(mut ch: Channel, caller: Caller, host: &dyn InferHost, admiss
         Some(ClientFrame::Infer(request)) => serve_infer(ch, caller, host, admission, request).await,
         Some(ClientFrame::Embed(request)) => serve_embed(ch, caller, host, admission, request).await,
         Some(ClientFrame::Transcribe(request)) => serve_transcribe(ch, caller, host, admission, request).await,
+        Some(ClientFrame::Speak(request)) => serve_speak(ch, caller, host, admission, request).await,
         Some(ClientFrame::Cancel { .. }) | None => Ok(()),
     }
 }
@@ -1269,5 +1827,130 @@ async fn serve_transcribe(
     finish.meta.served_by = Some(backend.name());
     finish.meta.timings.queued_ms = millis(queued);
     finish.meta.timings.total_ms = millis(started.elapsed());
+    ch.send_cbor(&ServerFrame::Done { id, finish }).await
+}
+
+/// Cancels the token when dropped, so a backend task stops however the request ends.
+struct CancelOnDrop(CancelToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn serve_speak(
+    mut ch: Channel,
+    caller: Caller,
+    host: &dyn InferHost,
+    admission: &Admission,
+    mut request: SpeakRequest,
+) -> Result<(), RemoteError> {
+    let started = Instant::now();
+    let id = request.id.clone();
+    let caller = caller.presenting(request.cert.take());
+    let opened = host.authorize(&caller).and_then(|()| request.check()).and_then(|()| host.open_speak(&caller, &request));
+    let backend = match opened {
+        Ok(b) => b,
+        Err(error) => return ch.send_cbor(&ServerFrame::Failed { id, error }).await,
+    };
+    let _permit = match wait_turn(&mut ch, &id, admission, request.priority).await? {
+        Waited::Go(p) => p,
+        Waited::Gone => return Ok(()),
+    };
+    let queued = started.elapsed();
+    ch.send_cbor(&ServerFrame::Accepted { id: id.clone(), model: backend.name(), attempt: 0, resume: false }).await?;
+    let accepted = Instant::now();
+    let cancel = CancelToken::new();
+    let _stop = CancelOnDrop(cancel.clone());
+    let mut keepalive = tokio::time::interval_at(Instant::now() + QUEUE_KEEPALIVE, QUEUE_KEEPALIVE);
+    let opened = {
+        let mut run = pin!(backend.speak(&request, &cancel));
+        loop {
+            tokio::select! {
+                r = &mut run => break r,
+                _ = keepalive.tick() => ch.send_cbor(&ServerFrame::Working { id: id.clone() }).await?,
+                m = ch.rx.recv() => match m {
+                    Ok(Some(bytes)) if is_cancel(&bytes, &id) => {
+                        cancel.cancel();
+                        return ch.send_cbor(&ServerFrame::Cancelled { id }).await;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => return Ok(()),
+                },
+            }
+        }
+    };
+    let mut stream = match opened {
+        Ok(s) => s,
+        Err(error) => return ch.send_cbor(&ServerFrame::Failed { id, error }).await,
+    };
+    let mut first_audio = None;
+    let mut offset = 0u64;
+    let mut usage: Option<Usage> = None;
+    let mut meta = Meta::default();
+    loop {
+        tokio::select! {
+            p = stream.next() => match p {
+                None => break,
+                Some(Err(error)) => return ch.send_cbor(&ServerFrame::Failed { id, error }).await,
+                Some(Ok(SpeechPiece::Start(h))) if first_audio.is_none() => {
+                    first_audio = Some(accepted.elapsed());
+                    ch.send_cbor(&ServerFrame::SpeechStart { id: id.clone(), format: h.format, sample_rate: h.sample_rate, channels: h.channels }).await?;
+                }
+                Some(Ok(SpeechPiece::Start(_))) => {
+                    let error = RemoteError::protocol("the speech backend started the audio twice");
+                    return ch.send_cbor(&ServerFrame::Failed { id, error }).await;
+                }
+                Some(Ok(SpeechPiece::Audio(data))) if first_audio.is_some() => {
+                    for chunk in data.chunks(MAX_AUDIO_CHUNK) {
+                        ch.send_cbor(&ServerFrame::Audio { id: id.clone(), offset, data: chunk.to_vec() }).await?;
+                        offset += chunk.len() as u64;
+                    }
+                }
+                Some(Ok(SpeechPiece::Audio(_))) => {
+                    let error = RemoteError::protocol("the speech backend sent audio before its format");
+                    return ch.send_cbor(&ServerFrame::Failed { id, error }).await;
+                }
+                Some(Ok(SpeechPiece::Usage(u))) => usage = Some(u),
+                Some(Ok(SpeechPiece::Meta(m))) => {
+                    for field in m.ignored {
+                        if !meta.ignored.contains(&field) {
+                            meta.ignored.push(field);
+                        }
+                    }
+                    if m.served_by.is_some() {
+                        meta.served_by = m.served_by;
+                    }
+                    if m.revision.is_some() {
+                        meta.revision = m.revision;
+                    }
+                }
+            },
+            _ = keepalive.tick(), if first_audio.is_none() => ch.send_cbor(&ServerFrame::Working { id: id.clone() }).await?,
+            m = ch.rx.recv() => match m {
+                Ok(Some(bytes)) if is_cancel(&bytes, &id) => {
+                    cancel.cancel();
+                    return ch.send_cbor(&ServerFrame::Cancelled { id }).await;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return Ok(()),
+            },
+        }
+    }
+    if first_audio.is_none() {
+        let error = RemoteError::Failed { message: "the speech backend finished without audio".into() };
+        return ch.send_cbor(&ServerFrame::Failed { id, error }).await;
+    }
+    let mut usage = usage.unwrap_or_default();
+    if usage.input_chars == 0 {
+        usage.input_chars = request.input.chars();
+    }
+    let mut finish = Finish::new("stop").with_usage(usage);
+    meta.served_by.get_or_insert_with(|| backend.name());
+    meta.timings.queued_ms = millis(queued);
+    meta.timings.first_token_ms = first_audio.map(millis);
+    meta.timings.total_ms = millis(started.elapsed());
+    finish.meta = meta;
     ch.send_cbor(&ServerFrame::Done { id, finish }).await
 }

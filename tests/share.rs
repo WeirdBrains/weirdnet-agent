@@ -10,12 +10,15 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use weirdnet_agent::pool::{self, PoolShare, encode_cert, encode_credential};
 use weirdnet_agent::remote::catalog::{self, CatalogFeed, CatalogModel, ModelState, Purpose};
-use weirdnet_agent::remote::infer::v2::{self, ClientFrame, Finish, InferBackend, Output, Request, ServerFrame, TranscribeRequest, Transcript};
+use weirdnet_agent::remote::infer::v2::{
+    self, AudioHeader, AudioStream, ClientFrame, Finish, InferBackend, Output, Request, ServerFrame, SpeakRequest, TranscribeRequest, Transcript,
+    Voice,
+};
 use weirdnet_agent::remote::infer::{Admission, InferHost};
 use weirdnet_agent::remote::pool::NoEvents;
 use weirdnet_agent::remote::{Caller, Dialer, RemoteError};
 use weirdnet_agent::serve::{Guest, GuestAuth, GuestPolicy, GuestScope, RosterAuth, Server, Serving, SharedPoolAuth};
-use weirdnet_agent::{CancelToken, Message, ModelBackend};
+use weirdnet_agent::{AudioFormat, CancelToken, Message, ModelBackend};
 use weirdnet_net::node::{Handler, Node, NodeConfig};
 use weirdnet_net::user::{NodeCert, user_id};
 use weirdnet_net::{Keypair, PeerId, WEIRDNET};
@@ -71,6 +74,19 @@ impl v2::TranscribeBackend for Ears {
     }
 }
 
+struct Mouth(&'static str);
+
+#[async_trait]
+impl v2::SpeakBackend for Mouth {
+    fn name(&self) -> String {
+        format!("kokoro@{}", self.0)
+    }
+    async fn speak(&self, request: &SpeakRequest, _cancel: &CancelToken) -> Result<AudioStream, RemoteError> {
+        let audio = vec![7u8; request.input.chars() as usize * 100];
+        Ok(AudioStream::from_file(AudioHeader::new(AudioFormat::Wav).with_sample_rate(24_000), audio, None))
+    }
+}
+
 /// An inference node of the owner: the roster for its own devices, guests by policy. Records
 /// who it served (own or guest) so the test sees the identity reach `open_request`.
 struct Host {
@@ -97,6 +113,13 @@ impl InferHost for Host {
     }
     fn open_transcribe(&self, _caller: &Caller, _model: Option<&str>) -> Result<Arc<dyn v2::TranscribeBackend>, RemoteError> {
         Ok(Arc::new(Ears(self.name)))
+    }
+    fn open_speak(&self, caller: &Caller, request: &SpeakRequest) -> Result<Arc<dyn v2::SpeakBackend>, RemoteError> {
+        // What Ymir does for guests: no voice cloning without a `clone` grant.
+        if self.auth.identify(caller, GuestScope::Infer)?.is_guest() && request.clones() {
+            return Err(RemoteError::refused("guest-clone"));
+        }
+        Ok(Arc::new(Mouth(self.name)))
     }
 }
 
@@ -152,6 +175,7 @@ fn a_guest_uses_a_shared_pool_until_revoked() {
         feed.publish(vec![
             CatalogModel::new("gemma", Purpose::Chat, ModelState::Warm).with_replicas(2),
             CatalogModel::new("voxtral", Purpose::Transcribe, ModelState::Warm),
+            CatalogModel::new("kokoro", Purpose::Speak, ModelState::Warm),
         ]);
         let mut servers = Vec::new();
         let mut hosts = Vec::new();
@@ -190,6 +214,12 @@ fn a_guest_uses_a_shared_pool_until_revoked() {
         assert_eq!(*hosts[0].served.lock().unwrap(), [(guest.peer_id().to_string(), true)], "the host saw a guest");
         let heard = pool.transcribe(TranscribeRequest::new(vec![0; 64], "wav"), &CancelToken::new()).await.unwrap();
         assert_eq!((heard.transcript.text.as_str(), heard.model.as_str()), ("64 bytes", "voxtral@node-a"));
+        // Speech out goes through the same `infer` scope.
+        assert_eq!(cat.speakers().count(), 1, "speak entries reach 0.5.11 guests");
+        let spoken = pool.speak(SpeakRequest::text("Hello"), &CancelToken::new()).await.unwrap();
+        assert_eq!((spoken.audio.len(), spoken.model.as_str(), spoken.sample_rate), (500, "kokoro@node-a", Some(24_000)));
+        let clip = Voice::clone_from(vec![1; 64], "wav", None, true);
+        assert_eq!(refused(pool.speak(SpeakRequest::text("Hello").with_voice(clip), &CancelToken::new()).await), "guest-clone");
         // Guests get no server-side context.
         let ctx = Request::context(v2::ContextRef::new("conv-1", None));
         assert_eq!(refused(pool.infer(ctx, &NoEvents, &CancelToken::new()).await.map_err(|i| i.error)), "guest-context");
@@ -220,6 +250,7 @@ fn a_guest_uses_a_shared_pool_until_revoked() {
             "not-shared"
         );
         assert_eq!(refused(pool.transcribe(TranscribeRequest::new(vec![0; 8], "wav"), &CancelToken::new()).await), "not-shared");
+        assert_eq!(refused(pool.speak(SpeakRequest::text("Hello"), &CancelToken::new()).await), "not-shared");
         let mut sd = pool::NetDialer::new(guest.clone());
         sd = {
             sd.hint(b.peer_id(), vec![addr(&b).parse().unwrap()]);

@@ -15,7 +15,7 @@
 //!
 //! - **`/weirdnet-agent/infer/2`** ([`v2`], CBOR): a priority queue with `Queued`, jobs and
 //!   attempts, resume from an assistant prefix, offsets, reasoning and tool-call frames, usage,
-//!   metadata, raw mode, embeddings and transcription.
+//!   metadata, raw mode, embeddings, transcription and speech out.
 //!
 //! Serving: the app accepts streams of each protocol and hands them, with the transport peer as
 //! a [`Caller`], to [`serve`] or [`v2::serve`]; both ask [`InferHost::authorize`] first and pass
@@ -116,6 +116,17 @@ pub trait InferHost: Send + Sync {
     fn open_transcribe(&self, caller: &Caller, model: Option<&str>) -> Result<Arc<dyn v2::TranscribeBackend>, RemoteError> {
         let _ = (caller, model);
         Err(RemoteError::unavailable("no transcription model on this node"))
+    }
+
+    /// The backend for speech out (infer/2 `Speak`, since 0.5.11). The request has been
+    /// authorized and checked ([`v2::SpeakRequest::check`]); its `model` names a speaking model
+    /// or, with `None`, leaves the pick to the node (inference nodes route with
+    /// [`Catalog::route_speak`](crate::remote::catalog::Catalog::route_speak) and
+    /// [`v2::SpeakRequest::needs`]). The whole request is here so a host can also refuse what a
+    /// caller may not do (a guest cloning a voice, say). Default: none here.
+    fn open_speak(&self, caller: &Caller, request: &v2::SpeakRequest) -> Result<Arc<dyn v2::SpeakBackend>, RemoteError> {
+        let _ = (caller, request);
+        Err(RemoteError::unavailable("no speech model on this node"))
     }
 }
 
@@ -319,6 +330,8 @@ impl ModelBackend for RemoteModel {
 #[cfg(test)]
 mod v2_tests;
 
+#[cfg(test)]
+mod speak_tests;
 #[cfg(test)]
 mod transcribe_tests;
 

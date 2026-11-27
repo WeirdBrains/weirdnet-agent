@@ -11,10 +11,12 @@
 //! - [`policy`]: tiers, per-companion per-site grants, task approvals and standing allows.
 //! - [`budget`]: searches, pages, concurrency and time limits.
 //! - [`trace`]: steps, citations and the cited-step check.
+//! - [`speech`]: speech out (text to speech): [`SpeechProfile`] (what a speaking model does) and
+//!   [`SpeechNeeds`] (what a request needs), for infer/2 `Speak` and catalog routing.
 //! - [`model`]: the model backend trait and chat messages, whose [`Content`] is text or parts
 //!   (text, images, audio, video) with the [`Modalities`] a model needs to read them.
 //! - [`remote`]: protocols between one user's nodes over an app-supplied channel: inference
-//!   (`infer/2` with priorities, queueing, reasoning, tool calls, embeddings, transcription and resume; `infer/1`
+//!   (`infer/2` with priorities, queueing, reasoning, tool calls, embeddings, transcription, speech and resume; `infer/1`
 //!   kept for 0.3 nodes), the model catalog, remote tasks (Node companions), and the
 //!   transport-neutral [`remote::pool::Pool`] that fails over and resumes answers across nodes,
 //!   and [`remote::share`] links for pools shared with another Weirdnet identity.
@@ -45,6 +47,7 @@ pub mod remote;
 #[cfg(feature = "serve")]
 pub mod serve;
 pub mod session;
+pub mod speech;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tool;
@@ -64,6 +67,7 @@ pub use policy::{
 };
 pub use remote::{Admitted, Authorize, Caller, RemoteError};
 pub use session::{AgentConfig, AgentEvent, AgentSession, ApprovalAnswer, Approver, Outcome, PagesPrompt, StopReason};
+pub use speech::{AudioFormat, CloneMode, SpeechNeeds, SpeechProfile};
 pub use tool::{
     BudgetCharge, CallTarget, LocalTools, RegistryError, SourceKind, Tool, ToolAnnotations, ToolContext, ToolError, ToolOutput, ToolRegistry,
     ToolSource, ToolSpec,
