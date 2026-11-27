@@ -1,6 +1,6 @@
 [package]
 name = "weirdnet-agent"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2024"
 rust-version = "1.99"
 description = "Weirdnet agent runtime: a model-agnostic agent loop with streaming events and cancellation, tool sources and registry, tiered approval policy with per-site grants and standing allows, research budgets, traces with citation checks, and remote inference (infer/1 and infer/2 with transcription and speech out, catalog, pool with failover and resume)."

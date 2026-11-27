@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-11-27
+
 ### Added
 
 - Speech out (text to speech) for Ymir's audio design and the four target speech models (Qwen3-TTS, Kokoro-82M, VoxCPM2, Fish Audio Drama 3): the new `speech` module with `AudioFormat` (`wav`, `pcm16`, `mp3`, `opus`, `flac`; `as_str`, `parse`, `mime`, `ALL`), `CloneMode` (`audio`, `audio_and_text`, `audio_text_required`), `SpeechProfile` (presets, design, instructions, clone, script speakers, max voices, raw, speed, streaming, languages, formats, sample rate, input/reference/output limits, license; every field absent when unknown) with `tightest`, `narrowed_by` and `covers`, `SpeechNeeds` and `wav_duration_ms`; re-exported at the crate root.
