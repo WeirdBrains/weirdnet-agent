@@ -3915,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "weirdnet-agent"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "async-trait",
  "base64",

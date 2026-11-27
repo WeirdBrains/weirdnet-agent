@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-11-27
+
 ### Added
 
 - Cross-identity pool sharing: let another Weirdnet identity use a pool with its own device certificate (catalog/1 and infer/2 only), without the pool's root identity.
