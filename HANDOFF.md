@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-27: released 0.5.11 (speech out)
+
+What changed: release commit [`306f7b0`](https://github.com/WeirdBrains/weirdnet-agent/commit/306f7b04c5e3c36c0f3b36c87f9d55a6af7e5507) (CI green on Linux, macOS and Windows), tag [`v0.5.11`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.11), then `scripts/weirdnet_release.py crates --tag v0.5.11`: on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.11), docs on [docs.rs](https://docs.rs/weirdnet-agent/0.5.11). Release basis: m3talsmith's standing decision for Weirdnet releases ("Don't ask about publishing").
+
+Checks run: the release script's checks, CI on the feature commit [`00fbb70`](https://github.com/WeirdBrains/weirdnet-agent/commit/00fbb7001f8b34493a40e0aad5195b8707eb2895) and the release commit, `cargo publish` verification; the rest is in the entry below.
+
+Not tested: as below.
+
+What's left and next: the [net.weirdbrains.com](https://net.weirdbrains.com) pages; [weirdnet-backends](https://crates.io/crates/weirdnet-backends) 0.4.10 (`Capabilities::speak`, vLLM-Omni, `Supervisor::speak`), weirdnet-openai 0.2.5 (`/v1/audio/speech`, `/v1/audio/transcriptions`) and [weirdnet-model](https://crates.io/crates/weirdnet-model) 0.5.5 (speaker catalog entries), then [Ymir](https://github.com/WeirdBrains/ymir)'s speech milestones.
+
 ## 2026-11-27: speech out (for 0.5.11)
 
 What changed: the commit that adds this entry adds the speech out (text to speech) contract from [Ymir](https://github.com/WeirdBrains/ymir)'s audio design (`docs/design/audio.md`, not yet on Ymir's `main`: "Speech out through the pool" and the `weirdnet-agent` crate spec, which named it 0.5.10 before native video took that number). All additive on 0.5.x (new enum variants and structs `#[non_exhaustive]`, new fields `#[serde(default, skip_serializing_if = ...)]`):
