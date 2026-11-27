@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-27: released 0.5.9 (pool sharing)
+
+What changed: release commit [`fa038ee`](https://github.com/WeirdBrains/weirdnet-agent/commit/fa038eeaf0f0d2d49210eb59407c6a6a0574904b) (CI green on Linux, macOS and Windows), tag [`v0.5.9`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.9), then `scripts/weirdnet_release.py crates --tag v0.5.9`: on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.9), docs on [docs.rs](https://docs.rs/weirdnet-agent/0.5.9). Release basis: m3talsmith's standing decision for Weirdnet releases ("Don't ask about publishing").
+
+Checks run: the release script's checks, CI on the feature commit [`bdb5be2`](https://github.com/WeirdBrains/weirdnet-agent/commit/bdb5be2b9457adc002dae7445f1a4e7c43bffaf3) and the release commit, `cargo publish` verification; the rest is in the entry below.
+
+Not tested: as below.
+
+What's left and next: the [net.weirdbrains.com](https://net.weirdbrains.com) pages; [Ymir](https://github.com/WeirdBrains/ymir) writes `docs/design/pool-sharing.md`, keeps the synced guest policy and wires `ymirctl pool share` / `unshare`.
+
 ## 2026-11-27: cross-identity pool sharing (for 0.5.9)
 
 What changed: the commit that adds this entry lets another Weirdnet identity (for example a person's [Morph](https://github.com/WeirdBrains/morph) identity, or someone else's) use a pool such as [Ymir](https://github.com/WeirdBrains/ymir) with its own device certificate, never the pool's root identity, for catalog/1 and infer/2 only. All additive on 0.5.x, all in this crate (no [weirdnet-sync](https://crates.io/crates/weirdnet-sync) change: [weirdnet-net](https://crates.io/crates/weirdnet-net)'s `Profile::verify_cert` and `user::user_id` are the primitives):
