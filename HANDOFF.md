@@ -2,6 +2,16 @@
 
 Running log for [weirdnet-agent](https://github.com/WeirdBrains/weirdnet-agent), newest first. Shared rules: the collective `AGENTS.md` and this repo's [AGENTS.md](AGENTS.md).
 
+## 2026-11-27: released 0.5.10 (native video)
+
+What changed: release commit [`ba5b3a7`](https://github.com/WeirdBrains/weirdnet-agent/commit/ba5b3a7b01e4d2e4c4d915d8eacbfb6a839cac37) (CI green on Linux, macOS and Windows), tag [`v0.5.10`](https://github.com/WeirdBrains/weirdnet-agent/tree/v0.5.10), then `scripts/weirdnet_release.py crates --tag v0.5.10`: on [crates.io](https://crates.io/crates/weirdnet-agent/0.5.10), docs on [docs.rs](https://docs.rs/weirdnet-agent/0.5.10). Release basis: m3talsmith's standing decision for Weirdnet releases ("Don't ask about publishing").
+
+Checks run: the release script's checks, CI on the feature commit [`9afb195`](https://github.com/WeirdBrains/weirdnet-agent/commit/9afb195ec5732d7c87c454d685223a3535bbcb4d) and the release commit, `cargo publish` verification; the rest is in the entry below.
+
+Not tested: as below.
+
+What's left and next: the [net.weirdbrains.com](https://net.weirdbrains.com) pages; [weirdnet-backends](https://crates.io/crates/weirdnet-backends) (`Capabilities.video`, `video_url` forwarding) and weirdnet-openai (`video_url` in the bridge), then [Ymir](https://github.com/WeirdBrains/ymir) milestones 3 and 4 and [Bragi](https://github.com/WeirdBrains/bragi) V4.
+
 ## 2026-11-27: native video (for 0.5.10)
 
 What changed: the commit that adds this entry adds the native video contract from [Ymir's video design](https://github.com/WeirdBrains/ymir/blob/main/docs/design/video.md) (phase 2, milestones 3 and 4) and [Bragi's](https://github.com/WeirdBrains/bragi/blob/main/docs/design/video.md) V4, so a whole clip can go to a model that reads video natively. All additive on 0.5.x (`ContentPart`, `Modalities` and `MediaLimits` are `#[non_exhaustive]`):
