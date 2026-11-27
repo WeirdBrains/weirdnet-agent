@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-11-27
+
 ### Added
 
 - Native video, for Bragi V4 and Ymir's video milestones 3 and 4: `ContentPart::VideoUrl { video_url: VideoUrl }` (`{"type": "video_url", "video_url": {"url": "data:video/...;base64,..."}}` in JSON and CBOR, the part vLLM and mistral.rs take) with `ContentPart::video` and `ContentPart::video_bytes`, `VideoUrl::mime_type` and `VideoUrl::data_len`; `Content::check` refuses video that is not a `data:video/` URL.
